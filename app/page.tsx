@@ -12,7 +12,7 @@ export default function LandingPage() {
               <span className="text-xl font-bold gradient-text">Internshiper</span>
             </div>
             <Link
-              href="/auth"
+              href="/dashboard"
               className="px-4 py-2 text-sm font-medium text-purple-400 hover:text-purple-300 transition-colors"
             >
               Sign In
@@ -48,7 +48,7 @@ export default function LandingPage() {
               </p>
 
               <Link
-                href="/auth"
+                href="/dashboard"
                 className="inline-flex items-center gap-2 px-8 py-4 rounded-lg gradient-purple text-white font-semibold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-purple-500/30"
               >
                 Get Started Free

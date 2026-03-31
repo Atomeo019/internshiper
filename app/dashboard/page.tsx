@@ -100,7 +100,7 @@ export default function DashboardPage() {
   };
 
   const handleLogOut = () => {
-    router.push('/auth');
+    router.push('/');
   };
 
   return (
