@@ -102,7 +102,7 @@ export default function LandingPage() {
       <footer className="border-t border-slate-800 py-8">
         <div className="max-w-7xl mx-auto px-6">
           <p className="text-center text-slate-500 text-sm">
-            © 2024 Internshiper. Built for college students.
+            © {new Date().getFullYear()} Internshiper. Built for college students.
           </p>
         </div>
       </footer>

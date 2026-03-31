@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
   Sparkles,
   LayoutDashboard,
@@ -10,12 +11,24 @@ import {
   Settings,
   Upload,
   LogOut,
-  X
+  X,
+  Loader
 } from 'lucide-react';
+
+const MAX_FILE_SIZE_MB = 10;
+const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+
+function validateFile(file: File): string | null {
+  if (file.type !== 'application/pdf') return 'Only PDF files are accepted.';
+  if (file.size > MAX_FILE_SIZE_BYTES) return `File exceeds ${MAX_FILE_SIZE_MB}MB limit.`;
+  return null;
+}
 
 export default function DashboardPage() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const router = useRouter();
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -31,22 +44,63 @@ export default function DashboardPage() {
     e.preventDefault();
     setIsDragging(false);
     const file = e.dataTransfer.files[0];
-    if (file && file.type === 'application/pdf') {
-      setUploadedFile(file);
-    }
+    if (!file) return;
+    const error = validateFile(file);
+    if (error) { setFileError(error); return; }
+    setFileError(null);
+    setUploadedFile(file);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setUploadedFile(file);
+    if (!file) return;
+    const error = validateFile(file);
+    if (error) {
+      setFileError(error);
+      e.target.value = '';
+      return;
+    }
+    setFileError(null);
+    setUploadedFile(file);
+  };
+
+  const handleAnalyze = async () => {
+    if (!uploadedFile || isAnalyzing) return;
+
+    setIsAnalyzing(true);
+    setFileError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadedFile);
+
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        setFileError(result.error || 'Analysis failed. Please try again.');
+        setIsAnalyzing(false);
+        return;
+      }
+
+      // Store the real analysis data for the results page
+      sessionStorage.setItem('resume_uploaded', 'true');
+      sessionStorage.setItem('analysis_result', JSON.stringify(result.analysis));
+
+      router.push('/results');
+
+    } catch {
+      setFileError('Network error. Make sure you are connected and try again.');
+      setIsAnalyzing(false);
     }
   };
 
-  const handleAnalyze = () => {
-    if (uploadedFile) {
-      router.push('/results');
-    }
+  const handleLogOut = () => {
+    router.push('/auth');
   };
 
   return (
@@ -61,39 +115,34 @@ export default function DashboardPage() {
 
         <nav className="flex-1 p-4">
           <div className="space-y-1">
-            <a
-              href="#"
+            <Link
+              href="/dashboard"
               className="flex items-center gap-3 px-4 py-3 rounded-lg bg-purple-600/10 text-purple-400 font-medium transition-colors"
             >
               <LayoutDashboard className="w-5 h-5" />
               Dashboard
-            </a>
-            <a
-              href="#"
-              className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors"
-            >
+            </Link>
+            {/* TODO: wire up when pages are built */}
+            <button disabled className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-600 cursor-not-allowed w-full">
               <FileText className="w-5 h-5" />
               My Resumes
-            </a>
-            <a
-              href="#"
-              className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors"
-            >
+            </button>
+            <button disabled className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-600 cursor-not-allowed w-full">
               <Target className="w-5 h-5" />
               Matches
-            </a>
-            <a
-              href="#"
-              className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors"
-            >
+            </button>
+            <button disabled className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-600 cursor-not-allowed w-full">
               <Settings className="w-5 h-5" />
               Settings
-            </a>
+            </button>
           </div>
         </nav>
 
         <div className="p-4 border-t border-slate-800">
-          <button className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors w-full">
+          <button
+            onClick={handleLogOut}
+            className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/50 transition-colors w-full"
+          >
             <LogOut className="w-5 h-5" />
             Log Out
           </button>
@@ -125,6 +174,7 @@ export default function DashboardPage() {
               accept=".pdf"
               onChange={handleFileChange}
               className="hidden"
+              disabled={isAnalyzing}
             />
 
             {!uploadedFile ? (
@@ -138,9 +188,7 @@ export default function DashboardPage() {
                 <h3 className="text-xl font-semibold mb-2">
                   Drop your resume here or click to browse
                 </h3>
-                <p className="text-slate-400 text-sm">
-                  PDF format only • Max 10MB
-                </p>
+                <p className="text-slate-400 text-sm">PDF format only • Max 10MB</p>
               </label>
             ) : (
               <div className="flex items-center justify-between bg-slate-800/50 rounded-lg p-4 border border-slate-700">
@@ -155,23 +203,43 @@ export default function DashboardPage() {
                     </p>
                   </div>
                 </div>
-                <button
-                  onClick={() => setUploadedFile(null)}
-                  className="w-8 h-8 rounded-full hover:bg-slate-700 flex items-center justify-center transition-colors"
-                >
-                  <X className="w-5 h-5 text-slate-400" />
-                </button>
+                {!isAnalyzing && (
+                  <button
+                    onClick={() => setUploadedFile(null)}
+                    className="w-8 h-8 rounded-full hover:bg-slate-700 flex items-center justify-center transition-colors"
+                  >
+                    <X className="w-5 h-5 text-slate-400" />
+                  </button>
+                )}
               </div>
             )}
           </div>
 
+          {fileError && (
+            <p className="mt-3 text-sm text-red-400 text-center">{fileError}</p>
+          )}
+
           {uploadedFile && (
             <button
               onClick={handleAnalyze}
-              className="w-full mt-6 py-4 rounded-lg gradient-purple text-white font-semibold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-purple-500/30"
+              disabled={isAnalyzing}
+              className="w-full mt-6 py-4 rounded-lg gradient-purple text-white font-semibold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-purple-500/30 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-3"
             >
-              Analyze My Resume
+              {isAnalyzing ? (
+                <>
+                  <Loader className="w-5 h-5 animate-spin" />
+                  Analyzing your resume...
+                </>
+              ) : (
+                'Analyze My Resume'
+              )}
             </button>
+          )}
+
+          {isAnalyzing && (
+            <p className="text-center text-slate-400 text-sm mt-3">
+              Extracting text and running AI analysis — this takes about 10 seconds
+            </p>
           )}
 
           <div className="mt-12 grid md:grid-cols-2 gap-6">
