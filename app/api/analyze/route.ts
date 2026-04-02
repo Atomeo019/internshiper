@@ -42,9 +42,9 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number; rese
 // Prune expired entries to prevent memory leak on long-running instances
 function pruneRateStore() {
   const now = Date.now();
-  for (const [ip, entry] of rateStore.entries()) {
+  rateStore.forEach((entry, ip) => {
     if (now > entry.resetAt) rateStore.delete(ip);
-  }
+  });
 }
 // Prune every 100 requests (cheap, not every call)
 let pruneCounter = 0;
