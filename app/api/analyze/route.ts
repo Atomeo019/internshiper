@@ -260,7 +260,7 @@ export async function POST(req: NextRequest) {
     // Groq free tier has strict TPM limits. Retry up to 2 times
     // with an 8-second pause before surfacing an error to the user.
     const GROQ_MAX_RETRIES = 2;
-    const GROQ_RETRY_DELAY = 8000; // ms
+    const GROQ_RETRY_DELAY = 5000; // ms
 
     let completion: Awaited<ReturnType<typeof groq.chat.completions.create>> | null = null;
     let lastGroqError: unknown = null;
@@ -268,7 +268,7 @@ export async function POST(req: NextRequest) {
     for (let attempt = 0; attempt <= GROQ_MAX_RETRIES; attempt++) {
       try {
         completion = await groq.chat.completions.create({
-          model: 'llama-3.3-70b-versatile',
+          model: 'llama-3.1-8b-instant',
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: buildUserPrompt(resumeText) },
