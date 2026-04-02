@@ -526,7 +526,22 @@ export async function POST(req: NextRequest) {
     consumeRateSlot(ip);
     return NextResponse.json({ success: true, analysis });
 
-  } catch (error) {
+  } catch (error: unknown) {
+    // ── Groq 429 (their rate limit, not ours) ────────────────
+    // Groq enforces its own RPM/TPM limits. When hit, surface a
+    // clear message instead of the opaque "Something went wrong."
+    const isGroq429 =
+      (error instanceof Error && /429|rate.?limit|too many/i.test(error.message)) ||
+      (typeof error === 'object' && error !== null && 'status' in error && (error as { status: number }).status === 429);
+
+    if (isGroq429) {
+      console.warn('⚠️  Groq rate limit hit (their side):', error);
+      return NextResponse.json(
+        { error: 'Our AI is temporarily busy — please wait 30 seconds and try again.' },
+        { status: 503 }
+      );
+    }
+
     console.error('❌ Analyze error:', error);
     return NextResponse.json(
       { error: 'Something went wrong. Please try again.' },
