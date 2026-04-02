@@ -21,22 +21,24 @@ function getClientIP(req: NextRequest): string {
   return 'unknown';
 }
 
-function checkRateLimit(ip: string): { allowed: boolean; remaining: number; resetAt: number } {
+// Check only — does NOT increment the counter
+function isRateLimited(ip: string): { limited: boolean; remaining: number; resetAt: number } {
   const now = Date.now();
   const entry = rateStore.get(ip);
+  if (!entry || now > entry.resetAt) return { limited: false, remaining: RATE_LIMIT_MAX, resetAt: now + RATE_LIMIT_WINDOW };
+  if (entry.count >= RATE_LIMIT_MAX) return { limited: true, remaining: 0, resetAt: entry.resetAt };
+  return { limited: false, remaining: RATE_LIMIT_MAX - entry.count, resetAt: entry.resetAt };
+}
 
+// Consume one slot — called ONLY on successful analysis
+function consumeRateSlot(ip: string): void {
+  const now = Date.now();
+  const entry = rateStore.get(ip);
   if (!entry || now > entry.resetAt) {
-    // New window
     rateStore.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
-    return { allowed: true, remaining: RATE_LIMIT_MAX - 1, resetAt: now + RATE_LIMIT_WINDOW };
+  } else {
+    entry.count += 1;
   }
-
-  if (entry.count >= RATE_LIMIT_MAX) {
-    return { allowed: false, remaining: 0, resetAt: entry.resetAt };
-  }
-
-  entry.count += 1;
-  return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count, resetAt: entry.resetAt };
 }
 
 // Prune expired entries to prevent memory leak on long-running instances
@@ -281,9 +283,9 @@ export async function POST(req: NextRequest) {
     if (++pruneCounter % 100 === 0) pruneRateStore();
 
     const ip = getClientIP(req);
-    const { allowed, remaining, resetAt } = checkRateLimit(ip);
+    const { limited, remaining, resetAt } = isRateLimited(ip);
 
-    if (!allowed) {
+    if (limited) {
       const retryAfterSec = Math.ceil((resetAt - Date.now()) / 1000);
       console.warn(`🚫 Rate limit hit — IP: ${ip}`);
       return NextResponse.json(
@@ -519,7 +521,9 @@ export async function POST(req: NextRequest) {
 
     console.log(`✅ Analysis complete — content: ${analysis.content_score} | ats: ${analysis.ats_score} | final: ${analysis.final_score} | strength: ${analysis.profile_strength} | red_flags: ${analysis.red_flags.length}`);
 
-    // ── 6. RETURN ────────────────────────────────────────────
+    // ── 6. CONSUME RATE SLOT + RETURN ───────────────────────
+    // Only count against the limit after a successful analysis — not on errors
+    consumeRateSlot(ip);
     return NextResponse.json({ success: true, analysis });
 
   } catch (error) {
