@@ -231,7 +231,7 @@ ANALYSIS RULES:
 const buildUserPrompt = (resumeText: string) => `Analyze this resume with brutal accuracy. Apply ALL scoring rules. Show your work in content_score calculation.
 
 RESUME:
-${resumeText.slice(0, 8000)}
+${resumeText.slice(0, 5000)}
 
 SCORING INSTRUCTIONS:
 1. Check for Rule 1 (no metrics), Rule 2 (attended meetings), Rule 4 (mislabeled AI/ML projects)
@@ -327,19 +327,48 @@ export async function POST(req: NextRequest) {
 
     console.log('✅ PDF extracted —', resumeText.length, 'characters');
 
-    // ── 3. CALL GROQ ─────────────────────────────────────────
+    // ── 3. CALL GROQ (with retry on 429) ─────────────────────
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(resumeText) },
-      ],
-      temperature: 0.1,
-      max_tokens: 3000,
-      response_format: { type: 'json_object' },
-    });
+    // Groq free tier has strict TPM limits. Retry up to 2 times
+    // with an 8-second pause before surfacing an error to the user.
+    const GROQ_MAX_RETRIES = 2;
+    const GROQ_RETRY_DELAY = 8000; // ms
+
+    let completion: Awaited<ReturnType<typeof groq.chat.completions.create>> | null = null;
+    let lastGroqError: unknown = null;
+
+    for (let attempt = 0; attempt <= GROQ_MAX_RETRIES; attempt++) {
+      try {
+        completion = await groq.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: buildUserPrompt(resumeText) },
+          ],
+          temperature: 0.1,
+          max_tokens: 2000,
+          response_format: { type: 'json_object' },
+        });
+        lastGroqError = null;
+        break; // success — exit retry loop
+      } catch (groqErr: unknown) {
+        lastGroqError = groqErr;
+        const is429 =
+          (groqErr instanceof Error && /429|rate.?limit|too many/i.test(groqErr.message)) ||
+          (typeof groqErr === 'object' && groqErr !== null && 'status' in groqErr && (groqErr as { status: number }).status === 429);
+
+        if (is429 && attempt < GROQ_MAX_RETRIES) {
+          console.warn(`⚠️  Groq 429 — attempt ${attempt + 1}/${GROQ_MAX_RETRIES + 1}, retrying in ${GROQ_RETRY_DELAY / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, GROQ_RETRY_DELAY));
+          continue;
+        }
+        // Not a 429, or out of retries — rethrow to outer catch
+        throw groqErr;
+      }
+    }
+
+    if (!completion) throw lastGroqError;
 
     const rawText = completion.choices[0]?.message?.content?.trim() ?? '';
 
