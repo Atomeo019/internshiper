@@ -4,54 +4,6 @@ import Groq from 'groq-sdk';
 const pdfParse = require('pdf-parse/lib/pdf-parse.js'); // eslint-disable-line
 
 // ============================================================
-// RATE LIMITER — in-memory, IP-based
-// Caveat: resets on cold starts in serverless (Vercel). Fine for
-// early-stage traffic. Upgrade to Upstash Redis if you hit scale.
-// ============================================================
-const RATE_LIMIT_MAX      = 5;   // max requests per window per IP
-const RATE_LIMIT_WINDOW   = 60 * 60 * 1000; // 1 hour in ms
-
-interface RateEntry { count: number; resetAt: number }
-const rateStore = new Map<string, RateEntry>();
-
-function getClientIP(req: NextRequest): string {
-  // x-forwarded-for is set by Vercel and most proxies
-  const forwarded = req.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
-  return 'unknown';
-}
-
-// Check only — does NOT increment the counter
-function isRateLimited(ip: string): { limited: boolean; remaining: number; resetAt: number } {
-  const now = Date.now();
-  const entry = rateStore.get(ip);
-  if (!entry || now > entry.resetAt) return { limited: false, remaining: RATE_LIMIT_MAX, resetAt: now + RATE_LIMIT_WINDOW };
-  if (entry.count >= RATE_LIMIT_MAX) return { limited: true, remaining: 0, resetAt: entry.resetAt };
-  return { limited: false, remaining: RATE_LIMIT_MAX - entry.count, resetAt: entry.resetAt };
-}
-
-// Consume one slot — called ONLY on successful analysis
-function consumeRateSlot(ip: string): void {
-  const now = Date.now();
-  const entry = rateStore.get(ip);
-  if (!entry || now > entry.resetAt) {
-    rateStore.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
-  } else {
-    entry.count += 1;
-  }
-}
-
-// Prune expired entries to prevent memory leak on long-running instances
-function pruneRateStore() {
-  const now = Date.now();
-  rateStore.forEach((entry, ip) => {
-    if (now > entry.resetAt) rateStore.delete(ip);
-  });
-}
-// Prune every 100 requests (cheap, not every call)
-let pruneCounter = 0;
-
-// ============================================================
 // TYPES — Phase 1 (internships moved to Phase 2)
 // ============================================================
 export interface AnalysisResult {
@@ -279,31 +231,6 @@ Return ONLY valid JSON:
 // ============================================================
 export async function POST(req: NextRequest) {
   try {
-    // ── 0. RATE LIMIT ────────────────────────────────────────
-    if (++pruneCounter % 100 === 0) pruneRateStore();
-
-    const ip = getClientIP(req);
-    const { limited, remaining, resetAt } = isRateLimited(ip);
-
-    if (limited) {
-      const retryAfterSec = Math.ceil((resetAt - Date.now()) / 1000);
-      console.warn(`🚫 Rate limit hit — IP: ${ip}`);
-      return NextResponse.json(
-        { error: `Too many requests. You can analyze ${RATE_LIMIT_MAX} resumes per hour. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` },
-        {
-          status: 429,
-          headers: {
-            'Retry-After': String(retryAfterSec),
-            'X-RateLimit-Limit':     String(RATE_LIMIT_MAX),
-            'X-RateLimit-Remaining': '0',
-            'X-RateLimit-Reset':     String(Math.ceil(resetAt / 1000)),
-          },
-        }
-      );
-    }
-
-    console.log(`✅ Rate limit OK — IP: ${ip} | remaining: ${remaining}/${RATE_LIMIT_MAX}`);
-
     // ── 1. GET FILE ──────────────────────────────────────────
     const formData = await req.formData();
     const file = (formData.get('file') || formData.get('resume')) as File | null;
@@ -550,9 +477,7 @@ export async function POST(req: NextRequest) {
 
     console.log(`✅ Analysis complete — content: ${analysis.content_score} | ats: ${analysis.ats_score} | final: ${analysis.final_score} | strength: ${analysis.profile_strength} | red_flags: ${analysis.red_flags.length}`);
 
-    // ── 6. CONSUME RATE SLOT + RETURN ───────────────────────
-    // Only count against the limit after a successful analysis — not on errors
-    consumeRateSlot(ip);
+    // ── 6. RETURN ────────────────────────────────────────────
     return NextResponse.json({ success: true, analysis });
 
   } catch (error: unknown) {
