@@ -122,25 +122,25 @@ export default function ResultsPage() {
         </div>
       </nav>
 
-      <main className="max-w-6xl mx-auto px-6 py-12 space-y-8">
+      <main className="max-w-6xl mx-auto px-4 md:px-6 py-8 md:py-12 space-y-6 md:space-y-8">
 
         {/* ── Header ── */}
         <div>
-          <h1 className="text-4xl font-bold mb-2">Resume Analysis Results</h1>
-          <p className="text-slate-400 text-lg">Evaluated against top-25% competitive tech internship programs</p>
+          <h1 className="text-2xl md:text-4xl font-bold mb-2">Resume Analysis Results</h1>
+          <p className="text-slate-400 text-base md:text-lg">Evaluated against top-25% competitive tech internship programs</p>
         </div>
 
         {/* ── Top Grid: Score Card + Issues + Action Plan ── */}
-        <div className="grid lg:grid-cols-3 gap-8">
+        <div className="grid lg:grid-cols-3 gap-6 md:gap-8">
 
           {/* Score Card */}
           <div className="lg:col-span-1">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 sticky top-6 space-y-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8 lg:sticky lg:top-6 space-y-6">
 
               {/* Circle */}
               <div className="flex flex-col items-center">
-                <div className="relative w-48 h-48 mb-4">
-                  <svg className="w-full h-full transform -rotate-90">
+                <div className="relative w-36 h-36 md:w-48 md:h-48 mb-4">
+                  <svg className="w-full h-full transform -rotate-90" viewBox="0 0 192 192">
                     <circle cx="96" cy="96" r="88" stroke="currentColor" strokeWidth="12" fill="none" className="text-slate-800" />
                     <circle
                       cx="96" cy="96" r="88"
@@ -160,7 +160,7 @@ export default function ResultsPage() {
                     </defs>
                   </svg>
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
-                    <span className="text-5xl font-bold gradient-text">{progress}</span>
+                    <span className="text-4xl md:text-5xl font-bold gradient-text">{progress}</span>
                     <span className="text-slate-400 text-sm">/100</span>
                   </div>
                 </div>
@@ -192,7 +192,7 @@ export default function ResultsPage() {
           </div>
 
           {/* Issues + Action Plan */}
-          <div className="lg:col-span-2 space-y-6">
+          <div className="lg:col-span-2 space-y-4 md:space-y-6">
 
             {/* Red Flags — prominent warning block */}
             {hasRedFlags && (
@@ -274,14 +274,14 @@ export default function ResultsPage() {
         </div>
 
         {/* ── ATS Breakdown ── */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8">
-          <div className="flex items-center gap-3 mb-6">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8">
+          <div className="flex flex-wrap items-center gap-2 md:gap-3 mb-6">
             <FileSearch className="w-6 h-6 text-blue-400" />
-            <h2 className="text-2xl font-bold">ATS Analysis</h2>
+            <h2 className="text-xl md:text-2xl font-bold">ATS Analysis</h2>
             <span className="text-sm text-slate-400">— how your resume survives automated filtering</span>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-4 mb-6">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4 mb-6">
             <div className={`p-4 rounded-xl border ${getRiskColor(analysis.ats_breakdown.parsing_risk)}`}>
               <p className="text-xs uppercase tracking-wider font-medium opacity-70 mb-1">Parsing Risk</p>
               <p className="text-lg font-bold">{analysis.ats_breakdown.parsing_risk}</p>
@@ -330,12 +330,12 @@ export default function ResultsPage() {
         </div>
 
         {/* ── Skills Analysis ── */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8">
           <div className="flex items-center gap-3 mb-6">
             <Brain className="w-6 h-6 text-purple-400" />
-            <h2 className="text-2xl font-bold">Skills Analysis</h2>
+            <h2 className="text-xl md:text-2xl font-bold">Skills Analysis</h2>
           </div>
-          <div className="grid md:grid-cols-3 gap-6">
+          <div className="grid md:grid-cols-3 gap-4 md:gap-6">
 
             <div>
               <div className="flex items-center gap-2 mb-3">
@@ -380,9 +380,9 @@ export default function ResultsPage() {
         </div>
 
         {/* ── Project & Experience Analysis ── */}
-        <div className="grid md:grid-cols-2 gap-8">
+        <div className="grid md:grid-cols-2 gap-4 md:gap-8">
 
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8">
             <div className="flex items-center gap-3 mb-4">
               <BarChart3 className="w-6 h-6 text-purple-400" />
               <h2 className="text-xl font-bold">Project Analysis</h2>
@@ -390,7 +390,7 @@ export default function ResultsPage() {
             <p className="text-slate-300 text-sm leading-relaxed">{analysis.project_analysis}</p>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 md:p-8">
             <div className="flex items-center gap-3 mb-4">
               <Briefcase className="w-6 h-6 text-purple-400" />
               <h2 className="text-xl font-bold">Experience Analysis</h2>

@@ -104,8 +104,25 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 flex">
-      <aside className="w-64 border-r border-slate-800 flex flex-col">
+    <div className="min-h-screen bg-slate-950 flex flex-col md:flex-row">
+
+      {/* ── Mobile top bar (hidden on desktop) ── */}
+      <header className="md:hidden flex items-center justify-between px-4 py-4 border-b border-slate-800">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-6 h-6 text-purple-500" />
+          <span className="text-lg font-bold gradient-text">Internshiper</span>
+        </div>
+        <button
+          onClick={handleLogOut}
+          className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors text-sm"
+        >
+          <LogOut className="w-4 h-4" />
+          Exit
+        </button>
+      </header>
+
+      {/* ── Sidebar (hidden on mobile) ── */}
+      <aside className="hidden md:flex w-64 border-r border-slate-800 flex-col">
         <div className="p-6 border-b border-slate-800">
           <div className="flex items-center gap-2">
             <Sparkles className="w-7 h-7 text-purple-500" />
@@ -122,7 +139,6 @@ export default function DashboardPage() {
               <LayoutDashboard className="w-5 h-5" />
               Dashboard
             </Link>
-            {/* TODO: wire up when pages are built */}
             <button disabled className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-600 cursor-not-allowed w-full">
               <FileText className="w-5 h-5" />
               My Resumes
@@ -149,11 +165,12 @@ export default function DashboardPage() {
         </div>
       </aside>
 
+      {/* ── Main content ── */}
       <main className="flex-1 overflow-auto">
-        <div className="max-w-4xl mx-auto px-8 py-12">
-          <div className="mb-8">
-            <h1 className="text-4xl font-bold mb-2">Upload Your Resume</h1>
-            <p className="text-slate-400 text-lg">
+        <div className="max-w-4xl mx-auto px-4 md:px-8 py-8 md:py-12">
+          <div className="mb-6 md:mb-8">
+            <h1 className="text-2xl md:text-4xl font-bold mb-2">Upload Your Resume</h1>
+            <p className="text-slate-400 text-base md:text-lg">
               Get instant AI-powered feedback and discover your best internship matches
             </p>
           </div>
@@ -162,7 +179,7 @@ export default function DashboardPage() {
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            className={`relative border-2 border-dashed rounded-2xl p-12 transition-all ${
+            className={`relative border-2 border-dashed rounded-2xl p-8 md:p-12 transition-all ${
               isDragging
                 ? 'border-purple-500 bg-purple-500/5'
                 : 'border-slate-700 hover:border-slate-600'
@@ -182,22 +199,22 @@ export default function DashboardPage() {
                 htmlFor="resume-upload"
                 className="flex flex-col items-center justify-center cursor-pointer"
               >
-                <div className="w-16 h-16 rounded-full bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-4">
-                  <Upload className="w-8 h-8 text-purple-400" />
+                <div className="w-14 h-14 md:w-16 md:h-16 rounded-full bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-4">
+                  <Upload className="w-7 h-7 md:w-8 md:h-8 text-purple-400" />
                 </div>
-                <h3 className="text-xl font-semibold mb-2">
-                  Drop your resume here or click to browse
+                <h3 className="text-base md:text-xl font-semibold mb-2 text-center">
+                  Tap to browse or drop your resume
                 </h3>
                 <p className="text-slate-400 text-sm">PDF format only • Max 10MB</p>
               </label>
             ) : (
               <div className="flex items-center justify-between bg-slate-800/50 rounded-lg p-4 border border-slate-700">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center flex-shrink-0">
                     <FileText className="w-5 h-5 text-purple-400" />
                   </div>
-                  <div>
-                    <p className="font-medium">{uploadedFile.name}</p>
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">{uploadedFile.name}</p>
                     <p className="text-sm text-slate-400">
                       {(uploadedFile.size / 1024).toFixed(1)} KB
                     </p>
@@ -206,7 +223,7 @@ export default function DashboardPage() {
                 {!isAnalyzing && (
                   <button
                     onClick={() => setUploadedFile(null)}
-                    className="w-8 h-8 rounded-full hover:bg-slate-700 flex items-center justify-center transition-colors"
+                    className="w-8 h-8 rounded-full hover:bg-slate-700 flex items-center justify-center transition-colors flex-shrink-0 ml-2"
                   >
                     <X className="w-5 h-5 text-slate-400" />
                   </button>
@@ -242,8 +259,8 @@ export default function DashboardPage() {
             </p>
           )}
 
-          <div className="mt-12 grid md:grid-cols-2 gap-6">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <div className="mt-8 md:mt-12 grid md:grid-cols-2 gap-4 md:gap-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 md:p-6">
               <div className="w-12 h-12 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-4">
                 <Target className="w-6 h-6 text-purple-400" />
               </div>
@@ -253,7 +270,7 @@ export default function DashboardPage() {
               </p>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 md:p-6">
               <div className="w-12 h-12 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-4">
                 <Sparkles className="w-6 h-6 text-purple-400" />
               </div>
