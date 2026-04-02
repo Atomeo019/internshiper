@@ -250,26 +250,30 @@ export default function ResultsPage() {
             </div>
 
             {/* Upgrade Insight */}
-            <div className="bg-gradient-to-br from-purple-900/40 to-violet-900/40 border-2 border-purple-500/30 rounded-2xl p-8">
-              <div className="flex items-start gap-4">
-                <div className="w-12 h-12 rounded-lg bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
-                  <Zap className="w-6 h-6 text-purple-300" />
-                </div>
-                <div>
-                  <h3 className="text-xl font-bold mb-2">Highest-Impact Move</h3>
-                  <p className="text-slate-300 leading-relaxed">
-                    <span className="font-semibold text-purple-300">{analysis.upgrade_insight.action}</span>
-                  </p>
-                  <p className="text-sm text-slate-400 mt-2">{analysis.upgrade_insight.reason}</p>
-                  <div className="mt-3 inline-flex items-center gap-2 px-3 py-1 bg-purple-500/20 border border-purple-500/30 rounded-full">
-                    <TrendingUp className="w-4 h-4 text-purple-300" />
-                    <span className="text-sm font-semibold text-purple-300">
-                      +{analysis.upgrade_insight.expected_score_increase} points
-                    </span>
+            {analysis.upgrade_insight?.action && (
+              <div className="bg-gradient-to-br from-purple-900/40 to-violet-900/40 border-2 border-purple-500/30 rounded-2xl p-8">
+                <div className="flex items-start gap-4">
+                  <div className="w-12 h-12 rounded-lg bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
+                    <Zap className="w-6 h-6 text-purple-300" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold mb-2">Highest-Impact Move</h3>
+                    <p className="text-slate-300 leading-relaxed">
+                      <span className="font-semibold text-purple-300">{analysis.upgrade_insight.action}</span>
+                    </p>
+                    <p className="text-sm text-slate-400 mt-2">{analysis.upgrade_insight.reason}</p>
+                    {analysis.upgrade_insight.expected_score_increase > 0 && (
+                      <div className="mt-3 inline-flex items-center gap-2 px-3 py-1 bg-purple-500/20 border border-purple-500/30 rounded-full">
+                        <TrendingUp className="w-4 h-4 text-purple-300" />
+                        <span className="text-sm font-semibold text-purple-300">
+                          +{analysis.upgrade_insight.expected_score_increase} points
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
 

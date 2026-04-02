@@ -473,6 +473,13 @@ export async function POST(req: NextRequest) {
     analysis.skills_analysis.strong_skills  = analysis.skills_analysis.strong_skills  ?? [];
     analysis.skills_analysis.missing_skills = analysis.skills_analysis.missing_skills ?? [];
 
+    if (!analysis.upgrade_insight) {
+      analysis.upgrade_insight = { action: '', expected_score_increase: 0, reason: '' };
+    }
+    analysis.upgrade_insight.action                  = analysis.upgrade_insight.action                  ?? '';
+    analysis.upgrade_insight.reason                  = analysis.upgrade_insight.reason                  ?? '';
+    analysis.upgrade_insight.expected_score_increase = analysis.upgrade_insight.expected_score_increase ?? 0;
+
     // ats_breakdown already initialized and enriched above — no-op here
 
     console.log(`✅ Analysis complete — content: ${analysis.content_score} | ats: ${analysis.ats_score} | final: ${analysis.final_score} | strength: ${analysis.profile_strength} | red_flags: ${analysis.red_flags.length}`);
