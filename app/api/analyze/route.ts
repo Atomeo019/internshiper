@@ -375,7 +375,7 @@ export async function POST(req: NextRequest) {
     } else {
       track = 'backend';
     }
-    console.log(\`🔍 Track detected: \${track} (frontend:\${frontendScore} data:\${dataScore} backend:\${backendScore})\`);
+    console.log(`🔍 Track detected: ${track} (frontend:${frontendScore} data:${dataScore} backend:${backendScore})`);
 
     // ── Track-specific keyword lists ─────────────────────────
     // Universal base — every tech candidate should have these
