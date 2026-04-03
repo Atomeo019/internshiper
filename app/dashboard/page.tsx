@@ -29,7 +29,6 @@ export default function DashboardPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState('Analyzing your resume...');
   const router = useRouter();
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -70,72 +69,38 @@ export default function DashboardPage() {
 
     setIsAnalyzing(true);
     setFileError(null);
-    setLoadingMessage('Analyzing your resume...');
 
-    const MAX_RETRIES = 3;
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadedFile);
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        if (attempt === 2) setLoadingMessage('Still working on it...');
-        if (attempt === 3) setLoadingMessage('Almost there, one moment...');
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        body: formData,
+      });
 
-        const formData = new FormData();
-        formData.append('file', uploadedFile);
+      const result = await response.json();
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 55000); // 55s client timeout
-        let response: Response;
-        try {
-          response = await fetch('/api/analyze', {
-            method: 'POST',
-            body: formData,
-            signal: controller.signal,
-          });
-        } finally {
-          clearTimeout(timeout);
-        }
-
-        const result = await response.json();
-
-        // Rate limit — don't retry, show specific message
-        if (response.status === 429) {
-          setFileError(result.error || 'Our AI is under high demand right now. Please try again in a few minutes.');
-          setIsAnalyzing(false);
-          return;
-        }
-
-        // Hard errors (bad file, invalid PDF) — don't retry
-        if (response.status === 400 || response.status === 422) {
-          setFileError(result.error || 'Could not read your PDF. Make sure it is not a scanned image.');
-          setIsAnalyzing(false);
-          return;
-        }
-
-        if (!response.ok || !result.success) {
-          // Soft error (500) — retry once silently
-          if (attempt < MAX_RETRIES) continue;
-          setFileError('Analysis failed. Please try again in a moment.');
-          setIsAnalyzing(false);
-          return;
-        }
-
-        // Success
-        sessionStorage.setItem('resume_uploaded', 'true');
-        sessionStorage.setItem('analysis_result', JSON.stringify(result.analysis));
-        sessionStorage.setItem('analysis_truncated', result.truncated ? 'true' : 'false');
-        router.push('/results');
-        return;
-
-      } catch {
-        // Network error — retry silently
-        if (attempt < MAX_RETRIES) {
-          await new Promise(res => setTimeout(res, 1000));
-          continue;
-        }
-        setFileError('Network error. Make sure you are connected and try again.');
+      if (response.status === 429) {
+        setFileError(result.error || 'High demand right now. Please try again in a few minutes.');
         setIsAnalyzing(false);
         return;
       }
+
+      if (!response.ok || !result.success) {
+        setFileError(result.error || 'Analysis failed. Please try again.');
+        setIsAnalyzing(false);
+        return;
+      }
+
+      sessionStorage.setItem('resume_uploaded', 'true');
+      sessionStorage.setItem('analysis_result', JSON.stringify(result.analysis));
+      sessionStorage.setItem('analysis_truncated', result.truncated ? 'true' : 'false');
+      router.push('/results');
+
+    } catch {
+      setFileError('Network error. Make sure you are connected and try again.');
+      setIsAnalyzing(false);
     }
   };
 
@@ -285,7 +250,7 @@ export default function DashboardPage() {
               {isAnalyzing ? (
                 <>
                   <Loader className="w-5 h-5 animate-spin" />
-                  {loadingMessage}
+                  Analyzing your resume...
                 </>
               ) : (
                 'Analyze My Resume'

@@ -266,40 +266,21 @@ export async function POST(req: NextRequest) {
     }
     console.log('✅ PDF extracted —', resumeText.length, 'characters');
 
-    // ── 3. CALL GROQ with retry ──────────────────────────────
+    // ── 3. CALL GROQ ─────────────────────────────────────────
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    let rawText = '';
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const completion = await groq.chat.completions.create({
-          model: 'llama-3.1-8b-instant',
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: buildUserPrompt(resumeText) },
-          ],
-          temperature: 0.1,
-          max_tokens: 2500,
-          response_format: { type: 'json_object' },
-        });
-        rawText = completion.choices[0]?.message?.content?.trim() ?? '';
-        console.log(`✅ Groq responded on attempt ${attempt}`);
-        break;
-      } catch (groqErr: any) {
-        const status = groqErr?.status ?? groqErr?.statusCode;
-        // 429 = rate limit — retrying burns more tokens and won't help, fail immediately
-        if (status === 429) {
-          console.warn('🚫 Groq rate limit hit — not retrying');
-          return NextResponse.json(
-            { error: 'Our AI is experiencing high demand right now. Please try again in a few minutes.' },
-            { status: 429 }
-          );
-        }
-        console.warn(`⚠️  Groq attempt ${attempt}/2 failed:`, groqErr);
-        if (attempt === 2) throw groqErr;
-        await new Promise(res => setTimeout(res, 2000));
-      }
-    }
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: buildUserPrompt(resumeText) },
+      ],
+      temperature: 0.1,
+      max_tokens: 2500,
+      response_format: { type: 'json_object' },
+    });
+
+    const rawText = completion.choices[0]?.message?.content?.trim() ?? '';
 
     // ── 4. PARSE JSON ────────────────────────────────────────
     let analysis: AnalysisResult;
