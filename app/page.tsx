@@ -9,7 +9,7 @@ export default function LandingPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Sparkles className="w-7 h-7 text-purple-500" />
-              <span className="text-xl font-bold gradient-text">Internshiper</span>
+              <span className="text-xl font-bold gradient-text">ResumeRoast</span>
             </div>
             <Link
               href="/dashboard"
@@ -102,7 +102,7 @@ export default function LandingPage() {
       <footer className="border-t border-slate-800 py-8">
         <div className="max-w-7xl mx-auto px-6">
           <p className="text-center text-slate-500 text-sm">
-            © {new Date().getFullYear()} Internshiper. Built for college students.
+            © {new Date().getFullYear()} ResumeRoast. Built for college students.
           </p>
         </div>
       </footer>

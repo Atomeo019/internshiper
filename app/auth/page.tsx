@@ -23,7 +23,7 @@ export default function AuthPage() {
         <div className="max-w-7xl mx-auto px-6 py-4">
           <Link href="/" className="flex items-center gap-2 w-fit">
             <Sparkles className="w-7 h-7 text-purple-500" />
-            <span className="text-xl font-bold gradient-text">Internshiper</span>
+            <span className="text-xl font-bold gradient-text">ResumeRoast</span>
           </Link>
         </div>
       </nav>

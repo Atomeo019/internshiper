@@ -180,10 +180,12 @@ ANALYSIS RULES:
 // ============================================================
 // USER PROMPT
 // ============================================================
+const MAX_RESUME_CHARS = 15000;
+
 const buildUserPrompt = (resumeText: string) => `Analyze this resume with brutal accuracy. Apply ALL scoring rules. Show your work in content_score calculation.
 
 RESUME:
-${resumeText.slice(0, 8000)}
+${resumeText.slice(0, MAX_RESUME_CHARS)}
 
 SCORING INSTRUCTIONS:
 1. Check for Rule 1 (no metrics), Rule 2 (attended meetings), Rule 4 (mislabeled AI/ML projects)
@@ -255,6 +257,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const isTruncated = resumeText.length > MAX_RESUME_CHARS;
+    if (isTruncated) {
+      console.warn(`⚠️  Resume truncated: ${resumeText.length} chars → ${MAX_RESUME_CHARS}`);
+    }
     console.log('✅ PDF extracted —', resumeText.length, 'characters');
 
     // ── 3. CALL GROQ ─────────────────────────────────────────
@@ -343,18 +349,45 @@ export async function POST(req: NextRequest) {
       analysis.content_score = contentCeiling;
     }
 
-    // ── ATS SCORE: Keyword Reality Check ────────────────────
-    // Llama inflates ATS scores. Enforce it with a real keyword scan.
-    // These are keywords ATS systems at competitive companies search for
-    // in SWE internship roles. Missing too many = score cannot be high.
-    const criticalSWEKeywords = [
-      'rest', 'api', 'sql', 'docker', 'aws', 'cloud',
-      'ci/cd', 'pipeline', 'linux', 'bash',
-      'jest', 'test', 'pytest', 'unit test',
-      'algorithm', 'data structure',
-      'agile', 'scrum', 'git',
-    ];
+    // ── ATS SCORE: Role-Aware Keyword Reality Check ─────────
+    // Detect the candidate's track first, then score against
+    // the keywords ATS systems actually look for in that track.
     const resumeLower = resumeText.toLowerCase();
+
+    // ── Track detection signals ──────────────────────────────
+    const frontendSignals   = ['react', 'vue', 'angular', 'html', 'css', 'javascript', 'typescript', 'next', 'tailwind', 'webpack', 'vite', 'figma', 'dom', 'redux'];
+    const dataSignals       = ['pandas', 'numpy', 'jupyter', 'matplotlib', 'seaborn', 'sklearn', 'scikit', 'tensorflow', 'pytorch', 'data science', 'machine learning', 'deep learning', 'statistics', 'regression', 'classification', 'nlp', 'r language', 'rstudio'];
+    const backendSignals    = ['docker', 'kubernetes', 'aws', 'azure', 'gcp', 'ci/cd', 'linux', 'bash', 'terraform', 'nginx', 'microservice', 'redis', 'kafka', 'rabbitmq'];
+
+    const frontendScore = frontendSignals.filter(s => resumeLower.includes(s)).length;
+    const dataScore     = dataSignals.filter(s => resumeLower.includes(s)).length;
+    const backendScore  = backendSignals.filter(s => resumeLower.includes(s)).length;
+
+    // Determine dominant track (falls back to general SWE if no clear winner)
+    let track: 'frontend' | 'data' | 'backend' | 'general';
+    const maxSignal = Math.max(frontendScore, dataScore, backendScore);
+    if (maxSignal < 2) {
+      track = 'general';
+    } else if (frontendScore === maxSignal) {
+      track = 'frontend';
+    } else if (dataScore === maxSignal) {
+      track = 'data';
+    } else {
+      track = 'backend';
+    }
+    console.log(\`🔍 Track detected: \${track} (frontend:\${frontendScore} data:\${dataScore} backend:\${backendScore})\`);
+
+    // ── Track-specific keyword lists ─────────────────────────
+    // Universal base — every tech candidate should have these
+
+    const trackKeywords: Record<string, string[]> = {
+      frontend: ['react', 'javascript', 'typescript', 'html', 'css', 'responsive', 'component', 'state', 'rest', 'git', 'api', 'test', 'agile', 'performance', 'accessibility'],
+      data:     ['python', 'sql', 'pandas', 'numpy', 'visualization', 'analysis', 'model', 'dataset', 'jupyter', 'git', 'api', 'test', 'agile', 'statistics', 'pipeline'],
+      backend:  ['rest', 'api', 'sql', 'docker', 'aws', 'cloud', 'ci/cd', 'linux', 'bash', 'jest', 'test', 'pytest', 'unit test', 'algorithm', 'agile', 'git'],
+      general:  ['rest', 'api', 'sql', 'git', 'agile', 'test', 'algorithm', 'data structure', 'cloud', 'linux'],
+    };
+
+    const criticalSWEKeywords = trackKeywords[track];
     const presentKeywords  = criticalSWEKeywords.filter(kw => resumeLower.includes(kw));
     const missingCount     = criticalSWEKeywords.length - presentKeywords.length;
     const missingRatio     = missingCount / criticalSWEKeywords.length;
@@ -452,7 +485,7 @@ export async function POST(req: NextRequest) {
     console.log(`✅ Analysis complete — content: ${analysis.content_score} | ats: ${analysis.ats_score} | final: ${analysis.final_score} | strength: ${analysis.profile_strength} | red_flags: ${analysis.red_flags.length}`);
 
     // ── 6. RETURN ─────────────────────────────────────────────
-    return NextResponse.json({ success: true, analysis });
+    return NextResponse.json({ success: true, analysis, truncated: isTruncated });
 
   } catch (error) {
     console.error('❌ Analyze error:', error);

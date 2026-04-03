@@ -90,6 +90,7 @@ export default function DashboardPage() {
       // Store the real analysis data for the results page
       sessionStorage.setItem('resume_uploaded', 'true');
       sessionStorage.setItem('analysis_result', JSON.stringify(result.analysis));
+      sessionStorage.setItem('analysis_truncated', result.truncated ? 'true' : 'false');
 
       router.push('/results');
 
@@ -110,7 +111,7 @@ export default function DashboardPage() {
       <header className="md:hidden flex items-center justify-between px-4 py-4 border-b border-slate-800">
         <div className="flex items-center gap-2">
           <Sparkles className="w-6 h-6 text-purple-500" />
-          <span className="text-lg font-bold gradient-text">Internshiper</span>
+          <span className="text-lg font-bold gradient-text">ResumeRoast</span>
         </div>
         <button
           onClick={handleLogOut}
@@ -126,7 +127,7 @@ export default function DashboardPage() {
         <div className="p-6 border-b border-slate-800">
           <div className="flex items-center gap-2">
             <Sparkles className="w-7 h-7 text-purple-500" />
-            <span className="text-xl font-bold gradient-text">Internshiper</span>
+            <span className="text-xl font-bold gradient-text">ResumeRoast</span>
           </div>
         </div>
 

@@ -8,21 +8,21 @@ export const metadata: Metadata = {
   metadataBase: new URL(
     process.env.NEXT_PUBLIC_SITE_URL ?? 'https://internshipper.vercel.app'
   ),
-  title: 'Internshipper — Brutally Honest Resume Analysis',
+  title: 'ResumeRoast — Brutally Honest Resume Analysis',
   description:
-    'Find out exactly why your resume gets filtered out. Internshipper scores your resume against top-25% competitive tech internship standards — ATS first, then recruiter lens. No sugarcoating.',
+    'Find out exactly why your resume gets filtered out. ResumeRoast scores your resume against top-25% competitive tech internship standards — ATS first, then recruiter lens. No sugarcoating.',
   openGraph: {
-    title: 'Internshipper — Brutally Honest Resume Analysis',
+    title: 'ResumeRoast — Brutally Honest Resume Analysis',
     description:
       'Find out exactly why your resume gets filtered out. Scored against top-25% competitive tech internship standards.',
     url: 'https://internshipper.vercel.app',
-    siteName: 'Internshipper',
+    siteName: 'ResumeRoast',
     locale: 'en_US',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Internshipper — Brutally Honest Resume Analysis',
+    title: 'ResumeRoast — Brutally Honest Resume Analysis',
     description:
       'Find out exactly why your resume gets filtered out. ATS filter first. Then recruiter lens. No sugarcoating.',
   },

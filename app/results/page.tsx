@@ -63,17 +63,23 @@ function ScoreBar({ label, score, color }: { label: string; score: number; color
 export default function ResultsPage() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [progress, setProgress] = useState(0);
+  const [sessionError, setSessionError] = useState(false);
+  const [isTruncated, setIsTruncated] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
-    const didUpload = sessionStorage.getItem('resume_uploaded');
-    if (!didUpload) { router.replace('/dashboard'); return; }
+    try {
+      const didUpload = sessionStorage.getItem('resume_uploaded');
+      const stored = sessionStorage.getItem('analysis_result');
 
-    const stored = sessionStorage.getItem('analysis_result');
-    if (!stored)    { router.replace('/dashboard'); return; }
+      if (!didUpload || !stored) {
+        setSessionError(true);
+        return;
+      }
 
-    const parsed: AnalysisResult = JSON.parse(stored);
-    setAnalysis(parsed);
+      const parsed: AnalysisResult = JSON.parse(stored);
+      setAnalysis(parsed);
+      setIsTruncated(sessionStorage.getItem('analysis_truncated') === 'true');
 
     // Animate score circle to final_score
     const target = parsed.final_score;
@@ -85,7 +91,32 @@ export default function ResultsPage() {
     }, 30);
 
     return () => clearInterval(progressInterval);
+    } catch {
+      setSessionError(true);
+    }
   }, [router]);
+
+  if (sessionError) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center px-6">
+        <div className="text-center max-w-md">
+          <div className="w-16 h-16 rounded-full bg-orange-500/10 border border-orange-500/20 flex items-center justify-center mx-auto mb-6">
+            <AlertCircle className="w-8 h-8 text-orange-400" />
+          </div>
+          <h2 className="text-2xl font-bold mb-3">Session Expired</h2>
+          <p className="text-slate-400 mb-6 leading-relaxed">
+            Your results couldn&apos;t be loaded — this usually happens on private browsing or when navigating directly to this page. Upload your resume again to get your analysis.
+          </p>
+          <button
+            onClick={() => router.push('/dashboard')}
+            className="px-6 py-3 rounded-lg gradient-purple text-white font-semibold hover:opacity-90 transition-opacity"
+          >
+            Go Back &amp; Upload Resume
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!analysis) {
     return (
@@ -117,7 +148,7 @@ export default function ResultsPage() {
           </button>
           <div className="flex items-center gap-2">
             <Sparkles className="w-7 h-7 text-purple-500" />
-            <span className="text-xl font-bold gradient-text">Internshiper</span>
+            <span className="text-xl font-bold gradient-text">ResumeRoast</span>
           </div>
         </div>
       </nav>
@@ -129,6 +160,16 @@ export default function ResultsPage() {
           <h1 className="text-2xl md:text-4xl font-bold mb-2">Resume Analysis Results</h1>
           <p className="text-slate-400 text-base md:text-lg">Evaluated against top-25% competitive tech internship programs</p>
         </div>
+
+        {/* Truncation warning */}
+        {isTruncated && (
+          <div className="flex items-start gap-3 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl">
+            <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+            <p className="text-yellow-300 text-sm">
+              <span className="font-semibold">Large resume detected.</span> Your file exceeded the analysis limit so only the first portion was evaluated. Keep your resume to 1 page — competitive internship programs prefer it and this tool is optimised for that.
+            </p>
+          </div>
+        )}
 
         {/* ── Top Grid: Score Card + Issues + Action Plan ── */}
         <div className="grid lg:grid-cols-3 gap-6 md:gap-8">
@@ -250,30 +291,26 @@ export default function ResultsPage() {
             </div>
 
             {/* Upgrade Insight */}
-            {analysis.upgrade_insight?.action && (
-              <div className="bg-gradient-to-br from-purple-900/40 to-violet-900/40 border-2 border-purple-500/30 rounded-2xl p-8">
-                <div className="flex items-start gap-4">
-                  <div className="w-12 h-12 rounded-lg bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
-                    <Zap className="w-6 h-6 text-purple-300" />
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-bold mb-2">Highest-Impact Move</h3>
-                    <p className="text-slate-300 leading-relaxed">
-                      <span className="font-semibold text-purple-300">{analysis.upgrade_insight.action}</span>
-                    </p>
-                    <p className="text-sm text-slate-400 mt-2">{analysis.upgrade_insight.reason}</p>
-                    {analysis.upgrade_insight.expected_score_increase > 0 && (
-                      <div className="mt-3 inline-flex items-center gap-2 px-3 py-1 bg-purple-500/20 border border-purple-500/30 rounded-full">
-                        <TrendingUp className="w-4 h-4 text-purple-300" />
-                        <span className="text-sm font-semibold text-purple-300">
-                          +{analysis.upgrade_insight.expected_score_increase} points
-                        </span>
-                      </div>
-                    )}
+            <div className="bg-gradient-to-br from-purple-900/40 to-violet-900/40 border-2 border-purple-500/30 rounded-2xl p-8">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-lg bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0">
+                  <Zap className="w-6 h-6 text-purple-300" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold mb-2">Highest-Impact Move</h3>
+                  <p className="text-slate-300 leading-relaxed">
+                    <span className="font-semibold text-purple-300">{analysis.upgrade_insight.action}</span>
+                  </p>
+                  <p className="text-sm text-slate-400 mt-2">{analysis.upgrade_insight.reason}</p>
+                  <div className="mt-3 inline-flex items-center gap-2 px-3 py-1 bg-purple-500/20 border border-purple-500/30 rounded-full">
+                    <TrendingUp className="w-4 h-4 text-purple-300" />
+                    <span className="text-sm font-semibold text-purple-300">
+                      +{analysis.upgrade_insight.expected_score_increase} points
+                    </span>
                   </div>
                 </div>
               </div>
-            )}
+            </div>
           </div>
         </div>
 
