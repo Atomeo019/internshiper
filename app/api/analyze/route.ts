@@ -183,7 +183,7 @@ ANALYSIS RULES:
 const buildUserPrompt = (resumeText: string) => `Analyze this resume with brutal accuracy. Apply ALL scoring rules. Show your work in content_score calculation.
 
 RESUME:
-${resumeText.slice(0, 5000)}
+${resumeText.slice(0, 8000)}
 
 SCORING INSTRUCTIONS:
 1. Check for Rule 1 (no metrics), Rule 2 (attended meetings), Rule 4 (mislabeled AI/ML projects)
@@ -231,6 +231,9 @@ Return ONLY valid JSON:
 // ============================================================
 export async function POST(req: NextRequest) {
   try {
+    // ── 0. RATE LIMIT — disabled for testing phase ───────────
+    // TODO: Re-enable rate limiting before production launch
+
     // ── 1. GET FILE ──────────────────────────────────────────
     const formData = await req.formData();
     const file = (formData.get('file') || formData.get('resume')) as File | null;
@@ -254,48 +257,19 @@ export async function POST(req: NextRequest) {
 
     console.log('✅ PDF extracted —', resumeText.length, 'characters');
 
-    // ── 3. CALL GROQ (with retry on 429) ─────────────────────
+    // ── 3. CALL GROQ ─────────────────────────────────────────
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    // Groq free tier has strict TPM limits. Retry up to 2 times
-    // with an 8-second pause before surfacing an error to the user.
-    const GROQ_MAX_RETRIES = 2;
-    const GROQ_RETRY_DELAY = 5000; // ms
-
-    let completion: Awaited<ReturnType<typeof groq.chat.completions.create>> | null = null;
-    let lastGroqError: unknown = null;
-
-    for (let attempt = 0; attempt <= GROQ_MAX_RETRIES; attempt++) {
-      try {
-        completion = await groq.chat.completions.create({
-          model: 'llama-3.1-8b-instant',
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: buildUserPrompt(resumeText) },
-          ],
-          temperature: 0.1,
-          max_tokens: 2000,
-          response_format: { type: 'json_object' },
-        });
-        lastGroqError = null;
-        break; // success — exit retry loop
-      } catch (groqErr: unknown) {
-        lastGroqError = groqErr;
-        const is429 =
-          (groqErr instanceof Error && /429|rate.?limit|too many/i.test(groqErr.message)) ||
-          (typeof groqErr === 'object' && groqErr !== null && 'status' in groqErr && (groqErr as { status: number }).status === 429);
-
-        if (is429 && attempt < GROQ_MAX_RETRIES) {
-          console.warn(`⚠️  Groq 429 — attempt ${attempt + 1}/${GROQ_MAX_RETRIES + 1}, retrying in ${GROQ_RETRY_DELAY / 1000}s...`);
-          await new Promise(resolve => setTimeout(resolve, GROQ_RETRY_DELAY));
-          continue;
-        }
-        // Not a 429, or out of retries — rethrow to outer catch
-        throw groqErr;
-      }
-    }
-
-    if (!completion) throw lastGroqError;
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: buildUserPrompt(resumeText) },
+      ],
+      temperature: 0.1,
+      max_tokens: 3000,
+      response_format: { type: 'json_object' },
+    });
 
     const rawText = completion.choices[0]?.message?.content?.trim() ?? '';
 
@@ -473,36 +447,14 @@ export async function POST(req: NextRequest) {
     analysis.skills_analysis.strong_skills  = analysis.skills_analysis.strong_skills  ?? [];
     analysis.skills_analysis.missing_skills = analysis.skills_analysis.missing_skills ?? [];
 
-    if (!analysis.upgrade_insight) {
-      analysis.upgrade_insight = { action: '', expected_score_increase: 0, reason: '' };
-    }
-    analysis.upgrade_insight.action                  = analysis.upgrade_insight.action                  ?? '';
-    analysis.upgrade_insight.reason                  = analysis.upgrade_insight.reason                  ?? '';
-    analysis.upgrade_insight.expected_score_increase = analysis.upgrade_insight.expected_score_increase ?? 0;
-
     // ats_breakdown already initialized and enriched above — no-op here
 
     console.log(`✅ Analysis complete — content: ${analysis.content_score} | ats: ${analysis.ats_score} | final: ${analysis.final_score} | strength: ${analysis.profile_strength} | red_flags: ${analysis.red_flags.length}`);
 
-    // ── 6. RETURN ────────────────────────────────────────────
+    // ── 6. RETURN ─────────────────────────────────────────────
     return NextResponse.json({ success: true, analysis });
 
-  } catch (error: unknown) {
-    // ── Groq 429 (their rate limit, not ours) ────────────────
-    // Groq enforces its own RPM/TPM limits. When hit, surface a
-    // clear message instead of the opaque "Something went wrong."
-    const isGroq429 =
-      (error instanceof Error && /429|rate.?limit|too many/i.test(error.message)) ||
-      (typeof error === 'object' && error !== null && 'status' in error && (error as { status: number }).status === 429);
-
-    if (isGroq429) {
-      console.warn('⚠️  Groq rate limit hit (their side):', error);
-      return NextResponse.json(
-        { error: 'Our AI is temporarily busy — please wait 30 seconds and try again.' },
-        { status: 503 }
-      );
-    }
-
+  } catch (error) {
     console.error('❌ Analyze error:', error);
     return NextResponse.json(
       { error: 'Something went wrong. Please try again.' },
