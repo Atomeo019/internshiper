@@ -82,10 +82,18 @@ export default function DashboardPage() {
         const formData = new FormData();
         formData.append('file', uploadedFile);
 
-        const response = await fetch('/api/analyze', {
-          method: 'POST',
-          body: formData,
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 55000); // 55s client timeout
+        let response: Response;
+        try {
+          response = await fetch('/api/analyze', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
 
         const result = await response.json();
 

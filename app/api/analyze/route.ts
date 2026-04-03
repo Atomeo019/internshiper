@@ -3,6 +3,9 @@ import Groq from 'groq-sdk';
 // Use specific internal path to prevent Next.js webpack from bundling test files
 const pdfParse = require('pdf-parse/lib/pdf-parse.js'); // eslint-disable-line
 
+// Tell Vercel to allow up to 60 seconds for this function (default is 10s)
+export const maxDuration = 60;
+
 // ============================================================
 // TYPES — Phase 1 (internships moved to Phase 2)
 // ============================================================
