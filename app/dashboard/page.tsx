@@ -29,6 +29,7 @@ export default function DashboardPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('Analyzing your resume...');
   const router = useRouter();
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -69,34 +70,57 @@ export default function DashboardPage() {
 
     setIsAnalyzing(true);
     setFileError(null);
+    setLoadingMessage('Analyzing your resume...');
 
-    try {
-      const formData = new FormData();
-      formData.append('file', uploadedFile);
+    const MAX_RETRIES = 3;
 
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        body: formData,
-      });
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        if (attempt === 2) setLoadingMessage('Still working on it...');
+        if (attempt === 3) setLoadingMessage('Almost there, one moment...');
 
-      const result = await response.json();
+        const formData = new FormData();
+        formData.append('file', uploadedFile);
 
-      if (!response.ok || !result.success) {
-        setFileError(result.error || 'Analysis failed. Please try again.');
+        const response = await fetch('/api/analyze', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const result = await response.json();
+
+        // Hard errors (bad file, invalid PDF) — don't retry, tell user immediately
+        if (response.status === 400 || response.status === 422) {
+          setFileError(result.error || 'Could not read your PDF. Make sure it is not a scanned image.');
+          setIsAnalyzing(false);
+          return;
+        }
+
+        if (!response.ok || !result.success) {
+          // Soft error (Groq timeout, 500) — retry silently
+          if (attempt < MAX_RETRIES) continue;
+          setFileError('Analysis failed after multiple attempts. Please try again in a moment.');
+          setIsAnalyzing(false);
+          return;
+        }
+
+        // Success
+        sessionStorage.setItem('resume_uploaded', 'true');
+        sessionStorage.setItem('analysis_result', JSON.stringify(result.analysis));
+        sessionStorage.setItem('analysis_truncated', result.truncated ? 'true' : 'false');
+        router.push('/results');
+        return;
+
+      } catch {
+        // Network error — retry silently
+        if (attempt < MAX_RETRIES) {
+          await new Promise(res => setTimeout(res, 1000));
+          continue;
+        }
+        setFileError('Network error. Make sure you are connected and try again.');
         setIsAnalyzing(false);
         return;
       }
-
-      // Store the real analysis data for the results page
-      sessionStorage.setItem('resume_uploaded', 'true');
-      sessionStorage.setItem('analysis_result', JSON.stringify(result.analysis));
-      sessionStorage.setItem('analysis_truncated', result.truncated ? 'true' : 'false');
-
-      router.push('/results');
-
-    } catch {
-      setFileError('Network error. Make sure you are connected and try again.');
-      setIsAnalyzing(false);
     }
   };
 
@@ -246,7 +270,7 @@ export default function DashboardPage() {
               {isAnalyzing ? (
                 <>
                   <Loader className="w-5 h-5 animate-spin" />
-                  Analyzing your resume...
+                  {loadingMessage}
                 </>
               ) : (
                 'Analyze My Resume'
@@ -256,7 +280,7 @@ export default function DashboardPage() {
 
           {isAnalyzing && (
             <p className="text-center text-slate-400 text-sm mt-3">
-              Extracting text and running AI analysis — this takes about 10 seconds
+              Extracting text and running AI analysis — this takes about 15 seconds
             </p>
           )}
 

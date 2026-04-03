@@ -263,21 +263,31 @@ export async function POST(req: NextRequest) {
     }
     console.log('✅ PDF extracted —', resumeText.length, 'characters');
 
-    // ── 3. CALL GROQ ─────────────────────────────────────────
+    // ── 3. CALL GROQ with retry ──────────────────────────────
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-    const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(resumeText) },
-      ],
-      temperature: 0.1,
-      max_tokens: 3000,
-      response_format: { type: 'json_object' },
-    });
-
-    const rawText = completion.choices[0]?.message?.content?.trim() ?? '';
+    let rawText = '';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const completion = await groq.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: buildUserPrompt(resumeText) },
+          ],
+          temperature: 0.1,
+          max_tokens: 3000,
+          response_format: { type: 'json_object' },
+        });
+        rawText = completion.choices[0]?.message?.content?.trim() ?? '';
+        console.log(`✅ Groq responded on attempt ${attempt}`);
+        break;
+      } catch (groqErr) {
+        console.warn(`⚠️  Groq attempt ${attempt}/3 failed:`, groqErr);
+        if (attempt === 3) throw groqErr;
+        await new Promise(res => setTimeout(res, attempt * 1500));
+      }
+    }
 
     // ── 4. PARSE JSON ────────────────────────────────────────
     let analysis: AnalysisResult;
