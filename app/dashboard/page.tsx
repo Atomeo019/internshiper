@@ -97,7 +97,14 @@ export default function DashboardPage() {
 
         const result = await response.json();
 
-        // Hard errors (bad file, invalid PDF) — don't retry, tell user immediately
+        // Rate limit — don't retry, show specific message
+        if (response.status === 429) {
+          setFileError(result.error || 'Our AI is under high demand right now. Please try again in a few minutes.');
+          setIsAnalyzing(false);
+          return;
+        }
+
+        // Hard errors (bad file, invalid PDF) — don't retry
         if (response.status === 400 || response.status === 422) {
           setFileError(result.error || 'Could not read your PDF. Make sure it is not a scanned image.');
           setIsAnalyzing(false);
@@ -105,9 +112,9 @@ export default function DashboardPage() {
         }
 
         if (!response.ok || !result.success) {
-          // Soft error (Groq timeout, 500) — retry silently
+          // Soft error (500) — retry once silently
           if (attempt < MAX_RETRIES) continue;
-          setFileError('Analysis failed after multiple attempts. Please try again in a moment.');
+          setFileError('Analysis failed. Please try again in a moment.');
           setIsAnalyzing(false);
           return;
         }
