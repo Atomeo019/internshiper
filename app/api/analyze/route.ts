@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 
-// Tell Vercel to allow up to 60 seconds for this function (default is 10s)
-export const maxDuration = 60;
+// Vercel Hobby plan hard ceiling is 10s — do not exceed this.
+// llama-3.1-8b-instant + PDF extraction typically completes in 3-7s.
+// If you upgrade to Vercel Pro, you can raise this to 60.
+export const maxDuration = 10;
 
 // ── pdfjs-dist module init ───────────────────────────────────────────────────
 // Must be at module level (runs once at cold start, not per-request).
