@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
-// Use specific internal path to prevent Next.js webpack from bundling test files
-const pdfParse = require('pdf-parse/lib/pdf-parse.js'); // eslint-disable-line
+// pdfjs-dist legacy build works reliably in Vercel serverless (pdf-parse does not)
+const pdfjs = require('pdfjs-dist/legacy/build/pdf.js'); // eslint-disable-line
+pdfjs.GlobalWorkerOptions.workerSrc = ''; // disable worker — not needed in Node.js
 
 // Tell Vercel to allow up to 60 seconds for this function (default is 10s)
 export const maxDuration = 60;
@@ -249,9 +250,21 @@ export async function POST(req: NextRequest) {
 
     // ── 2. EXTRACT TEXT ──────────────────────────────────────
     const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-    const data = await pdfParse(buffer);
-    const resumeText = data.text?.trim();
+    const uint8Array = new Uint8Array(bytes);
+
+    const loadingTask = pdfjs.getDocument({ data: uint8Array });
+    const pdfDoc = await loadingTask.promise;
+
+    let resumeText = '';
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page = await pdfDoc.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map((item: any) => ('str' in item ? item.str : ''))
+        .join(' ');
+      resumeText += pageText + '\n';
+    }
+    resumeText = resumeText.trim();
 
     if (!resumeText || resumeText.length < 50) {
       return NextResponse.json(
