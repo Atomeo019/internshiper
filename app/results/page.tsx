@@ -19,7 +19,7 @@ import {
   BarChart3,
   Briefcase,
 } from 'lucide-react';
-import type { AnalysisResult } from '../api/analyze/route';
+import type { AnalysisResult } from '@/lib/types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

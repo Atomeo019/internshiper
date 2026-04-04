@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 import pdfParse from 'pdf-parse';
+import type { AnalysisResult } from '@/lib/types';
 
 // Vercel Hobby plan hard ceiling is 10s — do not exceed this.
 // llama-3.1-8b-instant + PDF extraction typically completes in 3-7s.
@@ -18,41 +19,8 @@ if (!process.env.GROQ_API_KEY) {
   );
 }
 
-// ============================================================
-// TYPES — Phase 1 (internships moved to Phase 2)
-// ============================================================
-export interface AnalysisResult {
-  final_score: number;
-  content_score: number;
-  ats_score: number;
-  has_metrics: boolean;
-  profile_strength: 'Weak' | 'Average' | 'Good' | 'Strong';
-  summary: string;
-  strengths: string[];
-  issues: string[];
-  red_flags: string[];
-  action_plan: string[];
-  skills_analysis: {
-    strong_skills: string[];
-    weak_skills: string[];
-    missing_skills: string[];
-  };
-  project_analysis: string;
-  experience_analysis: string;
-  ats_breakdown: {
-    parsing_risk: 'None' | 'Low' | 'Medium' | 'High' | 'Critical';
-    keyword_density: 'None' | 'Low' | 'Adequate' | 'Strong';
-    formatting_issues: string[];
-    missing_keywords: string[];
-    ats_verdict: string;
-  };
-  upgrade_insight: {
-    action: string;
-    expected_score_increase: number;
-    reason: string;
-  };
-  competitive_position: string;
-}
+// AnalysisResult is defined in lib/types.ts — shared between server and client
+// without either side importing the other's module graph.
 
 // ============================================================
 // SYSTEM PROMPT — v5 (Phase 1, stacking caps, red flags enforced)
