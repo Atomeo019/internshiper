@@ -14,9 +14,9 @@ let pdfjsInitError: string | null = null;
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
-  // Disable the worker thread — not needed for server-side text extraction.
-  // pdfjs-dist handles missing canvas (required for rendering only) gracefully.
-  pdfjs.GlobalWorkerOptions.workerSrc = '';
+  // Do NOT set GlobalWorkerOptions.workerSrc in Node.js/serverless.
+  // The legacy build's built-in fake worker handles text extraction automatically.
+  // Setting workerSrc = '' causes "Setting up fake worker failed" in Vercel.
 } catch (e: any) {
   pdfjsInitError = e?.message ?? 'pdfjs-dist failed to load';
   console.error('❌ pdfjs-dist failed to initialize at cold start:', pdfjsInitError);
