@@ -1,11 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
-// pdfjs-dist legacy build works reliably in Vercel serverless (pdf-parse does not)
-const pdfjs = require('pdfjs-dist/legacy/build/pdf.js'); // eslint-disable-line
-pdfjs.GlobalWorkerOptions.workerSrc = ''; // disable worker — not needed in Node.js
 
 // Tell Vercel to allow up to 60 seconds for this function (default is 10s)
 export const maxDuration = 60;
+
+// ── pdfjs-dist module init ───────────────────────────────────────────────────
+// Must be at module level (runs once at cold start, not per-request).
+// Wrapped in try-catch so a bad cold start gives a 500 with a real error message
+// instead of silently crashing the entire route.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+let pdfjs: typeof import('pdfjs-dist') | null = null;
+let pdfjsInitError: string | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  // Disable the worker thread — not needed for server-side text extraction.
+  // pdfjs-dist handles missing canvas (required for rendering only) gracefully.
+  (pdfjs as any).GlobalWorkerOptions.workerSrc = '';
+} catch (e: any) {
+  pdfjsInitError = e?.message ?? 'pdfjs-dist failed to load';
+  console.error('❌ pdfjs-dist failed to initialize at cold start:', pdfjsInitError);
+}
+
+// ── GROQ_API_KEY guard ───────────────────────────────────────────────────────
+// Fail fast at cold start so the error shows up in Vercel function logs immediately,
+// instead of being swallowed by the per-request catch block.
+if (!process.env.GROQ_API_KEY) {
+  console.error(
+    '❌ GROQ_API_KEY is not set. ' +
+    'Add it to Vercel → Project → Settings → Environment Variables. ' +
+    'Every analysis request will fail until this is set.'
+  );
+}
 
 // ============================================================
 // TYPES — Phase 1 (internships moved to Phase 2)
@@ -237,8 +263,20 @@ Return ONLY valid JSON:
 // ============================================================
 export async function POST(req: NextRequest) {
   try {
-    // ── 0. RATE LIMIT — disabled for testing phase ───────────
-    // TODO: Re-enable rate limiting before production launch
+    // ── 0. GUARD: module init checks ─────────────────────────
+    if (pdfjsInitError || !pdfjs) {
+      return NextResponse.json(
+        { error: 'PDF processing is temporarily unavailable. Please try again.' },
+        { status: 503 }
+      );
+    }
+    if (!process.env.GROQ_API_KEY) {
+      console.error('❌ GROQ_API_KEY missing — rejecting request.');
+      return NextResponse.json(
+        { error: 'Service is not configured. Please contact support.' },
+        { status: 503 }
+      );
+    }
 
     // ── 1. GET FILE ──────────────────────────────────────────
     const formData = await req.formData();
@@ -280,7 +318,7 @@ export async function POST(req: NextRequest) {
     console.log('✅ PDF extracted —', resumeText.length, 'characters');
 
     // ── 3. CALL GROQ ─────────────────────────────────────────
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY! });
 
     const completion = await groq.chat.completions.create({
       model: 'llama-3.1-8b-instant',
@@ -503,8 +541,24 @@ export async function POST(req: NextRequest) {
     // ── 6. RETURN ─────────────────────────────────────────────
     return NextResponse.json({ success: true, analysis, truncated: isTruncated });
 
-  } catch (error) {
-    console.error('❌ Analyze error:', error);
+  } catch (error: any) {
+    // Log the full error server-side for Vercel function logs
+    console.error('❌ Analyze error:', error?.message ?? error);
+
+    // Groq auth errors (missing/invalid key)
+    if (error?.status === 401 || error?.message?.includes('API key')) {
+      return NextResponse.json(
+        { error: 'AI service authentication failed. Please contact support.' },
+        { status: 503 }
+      );
+    }
+    // Groq rate limiting (shouldn't reach here since 429 is handled above, but belt-and-suspenders)
+    if (error?.status === 429) {
+      return NextResponse.json(
+        { error: 'High demand right now. Please try again in a few minutes.' },
+        { status: 429 }
+      );
+    }
     return NextResponse.json(
       { error: 'Something went wrong. Please try again.' },
       { status: 500 }
