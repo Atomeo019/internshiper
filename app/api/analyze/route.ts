@@ -165,6 +165,84 @@ ANALYSIS RULES:
 - If layout cannot be determined from text: state in ats_verdict "Formatting inferred from text only — visual layout risks cannot be confirmed."`;
 
 // ============================================================
+// PDF FALLBACK HELPERS
+// ============================================================
+
+/**
+ * Fallback 1: use pdfjs-dist v3.x (installed, much newer than pdf-parse's
+ * bundled pdfjs v1.x). Handles ReportLab, Overleaf, and other PDFs that
+ * trigger false-positive XRef errors in pdfjs v1.x.
+ *
+ * Must use require() — not import — so webpack (via serverComponentsExternalPackages)
+ * leaves it for Node.js to resolve. Dynamic import() would still be traced by webpack.
+ */
+async function extractWithPdfjsDist(buffer: Buffer): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+
+  // Disable worker — in Node.js serverless there is no worker thread context.
+  // pdfjs-dist runs synchronously in the main thread when disableWorker is true.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    disableWorker: true,
+    verbosity: 0, // suppress canvas/rendering warnings irrelevant to text extraction
+  });
+
+  const pdfDoc = await loadingTask.promise;
+  const pageTexts: string[] = [];
+
+  for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+    const page = await pdfDoc.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    const pageText = (textContent.items as Array<{ str?: string }>)
+      .filter((item) => typeof item.str === 'string' && item.str.trim() !== '')
+      .map((item) => item.str!)
+      .join(' ');
+    pageTexts.push(pageText);
+  }
+
+  return pageTexts.join('\n').trim();
+}
+
+/**
+ * Fallback 2: naive BT/ET regex scan over the raw PDF bytes.
+ * Works only on PDFs with uncompressed content streams but costs almost nothing.
+ * ReportLab PDFs use FlateDecode, so this will typically return '' — but it's a
+ * free last-resort attempt before we give up entirely.
+ */
+function extractPDFTextRaw(buffer: Buffer): string {
+  const str = buffer.toString('latin1');
+  const parts: string[] = [];
+  const btEtRe = /BT([\s\S]*?)ET/g;
+  let m: RegExpExecArray | null;
+  while ((m = btEtRe.exec(str)) !== null) {
+    const block = m[1];
+    // Tj — single string
+    const tjRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*Tj/g;
+    let t: RegExpExecArray | null;
+    while ((t = tjRe.exec(block)) !== null) parts.push(decodePDFStr(t[1]));
+    // TJ — array of strings with kerning offsets
+    const tjArrRe = /\[([^\]]*)\]\s*TJ/g;
+    while ((t = tjArrRe.exec(block)) !== null) {
+      const strRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)/g;
+      let s: RegExpExecArray | null;
+      while ((s = strRe.exec(t[1])) !== null) parts.push(decodePDFStr(s[1]));
+    }
+    parts.push('\n');
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function decodePDFStr(s: string): string {
+  return s
+    .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+    .replace(/\\\(/g, '(').replace(/\\\)/g, ')').replace(/\\\\/g, '\\')
+    .replace(/\\(\d{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+}
+
+// ============================================================
 // USER PROMPT
 // ============================================================
 const MAX_RESUME_CHARS = 15000;
@@ -254,36 +332,58 @@ export async function POST(req: NextRequest) {
     }
 
     // ── Parse with targeted error handling ───────────────────
-    // "bad XRef entry" → malformed cross-reference table. Common in PDFs from
-    //   cheap mobile scanners, Canva/Figma exports, or partial uploads.
-    // "bad decrypt" / "No password"  → password-protected PDF.
-    // "Invalid PDF structure"         → truncated or severely corrupted file.
-    // All of these throw inside pdfParse — none should become a 500.
+    // Primary parser: pdf-parse (wraps pdfjs v1.x). Fast and handles most PDFs.
+    // Known limitation: pdfjs v1.x throws false-positive "bad XRef entry" on
+    //   certain valid PDFs (ReportLab, some Overleaf exports). These are NOT
+    //   corrupted — they just exercise parsing paths that v1.x never fixed.
+    //
+    // Fallback chain on primary failure:
+    //   1. pdfjs-dist v3.x  — modern, handles far more PDF variants
+    //   2. raw BT/ET regex  — last resort for uncompressed content streams
+    //   → only after all three fail do we return 422 to the user
+    //
+    // Definite rejections (no fallback attempted):
+    //   "bad decrypt" / "No password" → password-protected PDF
     let resumeText: string;
     try {
       const pdfData = await pdfParse(buffer);
       resumeText = pdfData.text.trim();
     } catch (parseErr: any) {
       const msg: string = parseErr?.message ?? '';
-      console.warn('⚠️  PDF parse failed:', msg);
+      console.warn('⚠️  pdf-parse failed:', msg);
 
-      if (msg.includes('bad XRef') || msg.includes('Invalid XRef') || msg.includes('XRef')) {
-        return NextResponse.json(
-          { error: 'Your PDF has a corrupted structure (bad cross-reference table). Re-export it from your word processor and try again.' },
-          { status: 422 }
-        );
-      }
+      // Password-protected PDFs: no point attempting fallbacks
       if (msg.includes('decrypt') || msg.includes('password') || msg.includes('Password')) {
         return NextResponse.json(
           { error: 'Your PDF is password-protected. Remove the password and re-upload.' },
           { status: 422 }
         );
       }
-      // Any other parse failure — unknown corruption or unsupported PDF variant
-      return NextResponse.json(
-        { error: 'Could not read your PDF. Try re-exporting it as a PDF from Word, Google Docs, or Overleaf.' },
-        { status: 422 }
-      );
+
+      // For any other parse error (XRef, Invalid structure, etc.) — the file
+      // passed the %PDF header check, so it IS a real PDF. Try the fallback chain
+      // before blaming the user's file.
+      console.warn('⚠️  Attempting pdfjs-dist v3.x fallback...');
+      let fallbackText = '';
+      try {
+        fallbackText = await extractWithPdfjsDist(buffer);
+        console.log('✅ pdfjs-dist fallback succeeded —', fallbackText.length, 'chars');
+      } catch (fallbackErr: any) {
+        console.warn('⚠️  pdfjs-dist fallback failed:', fallbackErr?.message ?? fallbackErr);
+        // Last resort: regex scan over raw bytes (free, works on uncompressed PDFs)
+        fallbackText = extractPDFTextRaw(buffer);
+        if (fallbackText.length >= 50) {
+          console.log('✅ Raw regex fallback succeeded —', fallbackText.length, 'chars');
+        } else {
+          console.warn('⚠️  All extraction methods failed for this PDF');
+          return NextResponse.json(
+            { error: 'Could not extract text from your PDF. Try re-exporting it from Word, Google Docs, or Overleaf — this usually fixes the issue.' },
+            { status: 422 }
+          );
+        }
+      }
+
+      resumeText = fallbackText.trim();
     }
 
     if (!resumeText || resumeText.length < 50) {

@@ -17,7 +17,11 @@ const nextConfig = {
     serverComponentsExternalPackages: ['pdf-parse', 'pdfjs-dist'],
     outputFileTracingIncludes: {
       '/api/analyze': [
+        // pdf-parse ships pdfjs v1.x via template literal requires — tracer misses them
         './node_modules/pdf-parse/lib/**/*',
+        // pdfjs-dist legacy build — used as fallback when pdf-parse fails on valid PDFs
+        // (e.g. ReportLab-generated PDFs that trigger false-positive XRef errors in pdfjs v1.x)
+        './node_modules/pdfjs-dist/legacy/build/**/*',
       ],
     },
   },
