@@ -177,7 +177,6 @@ ANALYSIS RULES:
  * leaves it for Node.js to resolve. Dynamic import() would still be traced by webpack.
  */
 async function extractWithPdfjsDist(buffer: Buffer): Promise<string> {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
   // Disable worker — in Node.js serverless there is no worker thread context.
