@@ -3,6 +3,10 @@ import Groq from 'groq-sdk';
 import pdfParse from 'pdf-parse';
 import type { AnalysisResult } from '@/lib/types';
 
+// Force Node.js runtime — pdf-parse requires Node.js APIs (Buffer, fs).
+// Edge runtime has neither, and would fail silently before even hitting the worker error.
+export const runtime = 'nodejs';
+
 // Vercel Hobby plan hard ceiling is 10s — do not exceed this.
 // llama-3.1-8b-instant + PDF extraction typically completes in 3-7s.
 // If you upgrade to Vercel Pro, you can raise this to 60.
