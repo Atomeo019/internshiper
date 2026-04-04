@@ -12,6 +12,22 @@ export const runtime = 'nodejs';
 // If you upgrade to Vercel Pro, you can raise this to 60.
 export const maxDuration = 10;
 
+// ── pdfjs-dist module-level init ─────────────────────────────────────────────
+// Load once at cold start. Per-request require() of a 1 MB file eats ~500ms
+// of the 10s budget AND can deadlock on Vercel — pdfjs-dist's async canvas
+// polyfill init stalls in serverless, causing await loadingTask.promise to
+// hang forever with no throw, so the catch block never fires.
+// Initialising here lets us fail fast if the module isn't in the bundle AND
+// ensures every request reuses the already-loaded module.
+let pdfjsLib: any = null;
+try {
+  pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+  console.log('✅ pdfjs-dist loaded at module init');
+} catch (e: any) {
+  console.warn('⚠️  pdfjs-dist unavailable at module init:', e.message);
+}
+
 // ── GROQ_API_KEY guard ───────────────────────────────────────────────────────
 // Fail fast at cold start so the error shows up in Vercel function logs immediately,
 // instead of being swallowed by the per-request catch block.
@@ -169,18 +185,32 @@ ANALYSIS RULES:
 // ============================================================
 
 /**
+ * Race a promise against a hard deadline.
+ * If the promise hasn't settled within `ms`, rejects with a timeout error.
+ * The original promise is left hanging — Node.js will GC it when the
+ * serverless instance is recycled (fine; we just need to return a response).
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+/**
  * Fallback 1: use pdfjs-dist v3.x (installed, much newer than pdf-parse's
  * bundled pdfjs v1.x). Handles ReportLab, Overleaf, and other PDFs that
  * trigger false-positive XRef errors in pdfjs v1.x.
  *
- * Must use require() — not import — so webpack (via serverComponentsExternalPackages)
- * leaves it for Node.js to resolve. Dynamic import() would still be traced by webpack.
+ * Uses the module-level pdfjsLib instance — not a per-request require().
  */
 async function extractWithPdfjsDist(buffer: Buffer): Promise<string> {
-  const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+  if (!pdfjsLib) throw new Error('pdfjs-dist not available in this deployment');
 
   // Disable worker — in Node.js serverless there is no worker thread context.
-  // pdfjs-dist runs synchronously in the main thread when disableWorker is true.
+  // disableWorker: true keeps everything in the main thread.
   pdfjsLib.GlobalWorkerOptions.workerSrc = '';
 
   const loadingTask = pdfjsLib.getDocument({
@@ -307,6 +337,8 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 1. GET FILE ──────────────────────────────────────────
+    const requestStart = Date.now();
+
     const formData = await req.formData();
     const file = (formData.get('file') || formData.get('resume')) as File | null;
 
@@ -317,6 +349,7 @@ export async function POST(req: NextRequest) {
     // ── 2. EXTRACT TEXT ──────────────────────────────────────
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
+    console.log(`📥 [+${Date.now() - requestStart}ms] Received file: ${file.name} (${buffer.length} bytes)`);
 
     // ── PDF signature check ──────────────────────────────────
     // Every valid PDF starts with %PDF. Catch renamed files (.doc saved as .pdf,
@@ -362,13 +395,14 @@ export async function POST(req: NextRequest) {
       // For any other parse error (XRef, Invalid structure, etc.) — the file
       // passed the %PDF header check, so it IS a real PDF. Try the fallback chain
       // before blaming the user's file.
-      console.warn('⚠️  Attempting pdfjs-dist v3.x fallback...');
+      // Budget: give pdfjs-dist at most 2500ms so Groq still has ~6s of runway.
+      console.warn(`⚠️  [+${Date.now() - requestStart}ms] Attempting pdfjs-dist v3.x fallback...`);
       let fallbackText = '';
       try {
-        fallbackText = await extractWithPdfjsDist(buffer);
-        console.log('✅ pdfjs-dist fallback succeeded —', fallbackText.length, 'chars');
+        fallbackText = await withTimeout(extractWithPdfjsDist(buffer), 2500, 'pdfjs-dist');
+        console.log(`✅ [+${Date.now() - requestStart}ms] pdfjs-dist fallback succeeded — ${fallbackText.length} chars`);
       } catch (fallbackErr: any) {
-        console.warn('⚠️  pdfjs-dist fallback failed:', fallbackErr?.message ?? fallbackErr);
+        console.warn(`⚠️  [+${Date.now() - requestStart}ms] pdfjs-dist fallback failed:`, fallbackErr?.message ?? fallbackErr);
         // Last resort: regex scan over raw bytes (free, works on uncompressed PDFs)
         fallbackText = extractPDFTextRaw(buffer);
         if (fallbackText.length >= 50) {
@@ -396,22 +430,34 @@ export async function POST(req: NextRequest) {
     if (isTruncated) {
       console.warn(`⚠️  Resume truncated: ${resumeText.length} chars → ${MAX_RESUME_CHARS}`);
     }
-    console.log('✅ PDF extracted —', resumeText.length, 'characters');
+    console.log(`📄 [+${Date.now() - requestStart}ms] Parsed text: ${resumeText.length} chars`);
 
     // ── 3. CALL GROQ ─────────────────────────────────────────
+    // Budget: we have a 10s hard ceiling. Allow Groq up to 8000ms minus however
+    // long parsing already took, with a floor of 5000ms so we don't give it an
+    // unreasonably short window on fast parses.
+    const elapsed = Date.now() - requestStart;
+    const groqBudget = Math.max(5000, 8000 - elapsed);
+    console.log(`🤖 [+${elapsed}ms] Calling AI (budget: ${groqBudget}ms)...`);
+
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY! });
 
-    const completion = await groq.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(resumeText) },
-      ],
-      temperature: 0.1,
-      max_tokens: 2500,
-      response_format: { type: 'json_object' },
-    });
+    const completion = await withTimeout(
+      groq.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: buildUserPrompt(resumeText) },
+        ],
+        temperature: 0.1,
+        max_tokens: 2000,
+        response_format: { type: 'json_object' },
+      }),
+      groqBudget,
+      'Groq API'
+    );
 
+    console.log(`✅ [+${Date.now() - requestStart}ms] AI response received`);
     const rawText = completion.choices[0]?.message?.content?.trim() ?? '';
 
     // ── 4. PARSE JSON ────────────────────────────────────────
@@ -625,6 +671,14 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     // Log the full error server-side for Vercel function logs
     console.error('❌ Analyze error:', error?.message ?? error);
+
+    // Timeout from withTimeout() — budget exhausted before a response was ready
+    if (error?.message?.includes('timed out after')) {
+      return NextResponse.json(
+        { error: 'Analysis took too long to complete. Please try again — this is usually a temporary issue.' },
+        { status: 504 }
+      );
+    }
 
     // Groq auth errors (missing/invalid key)
     if (error?.status === 401 || error?.message?.includes('API key')) {
