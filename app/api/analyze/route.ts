@@ -8,12 +8,10 @@ export const maxDuration = 60;
 // Must be at module level (runs once at cold start, not per-request).
 // Wrapped in try-catch so a bad cold start gives a 500 with a real error message
 // instead of silently crashing the entire route.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 let pdfjs: any = null;
 let pdfjsInitError: string | null = null;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  pdfjs = require('pdfjs-dist/legacy/build/pdf.js'); // eslint-disable-line
   // Do NOT set GlobalWorkerOptions.workerSrc in Node.js/serverless.
   // The legacy build's built-in fake worker handles text extraction automatically.
   // Setting workerSrc = '' causes "Setting up fake worker failed" in Vercel.
