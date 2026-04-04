@@ -241,12 +241,54 @@ export async function POST(req: NextRequest) {
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    const pdfData = await pdfParse(buffer);
-    let resumeText = pdfData.text.trim();
+    // ── PDF signature check ──────────────────────────────────
+    // Every valid PDF starts with %PDF. Catch renamed files (.doc saved as .pdf,
+    // empty uploads, truncated transfers) before handing them to the parser.
+    const header = buffer.slice(0, 5).toString('ascii');
+    if (!header.startsWith('%PDF')) {
+      console.warn('⚠️  Rejected: file does not start with %PDF header');
+      return NextResponse.json(
+        { error: 'The uploaded file is not a valid PDF. Please export your resume as a PDF and try again.' },
+        { status: 422 }
+      );
+    }
+
+    // ── Parse with targeted error handling ───────────────────
+    // "bad XRef entry" → malformed cross-reference table. Common in PDFs from
+    //   cheap mobile scanners, Canva/Figma exports, or partial uploads.
+    // "bad decrypt" / "No password"  → password-protected PDF.
+    // "Invalid PDF structure"         → truncated or severely corrupted file.
+    // All of these throw inside pdfParse — none should become a 500.
+    let resumeText: string;
+    try {
+      const pdfData = await pdfParse(buffer);
+      resumeText = pdfData.text.trim();
+    } catch (parseErr: any) {
+      const msg: string = parseErr?.message ?? '';
+      console.warn('⚠️  PDF parse failed:', msg);
+
+      if (msg.includes('bad XRef') || msg.includes('Invalid XRef') || msg.includes('XRef')) {
+        return NextResponse.json(
+          { error: 'Your PDF has a corrupted structure (bad cross-reference table). Re-export it from your word processor and try again.' },
+          { status: 422 }
+        );
+      }
+      if (msg.includes('decrypt') || msg.includes('password') || msg.includes('Password')) {
+        return NextResponse.json(
+          { error: 'Your PDF is password-protected. Remove the password and re-upload.' },
+          { status: 422 }
+        );
+      }
+      // Any other parse failure — unknown corruption or unsupported PDF variant
+      return NextResponse.json(
+        { error: 'Could not read your PDF. Try re-exporting it as a PDF from Word, Google Docs, or Overleaf.' },
+        { status: 422 }
+      );
+    }
 
     if (!resumeText || resumeText.length < 50) {
       return NextResponse.json(
-        { error: 'Could not extract text from the PDF. Make sure it is not a scanned image.' },
+        { error: 'Your PDF appears to be a scanned image — no machine-readable text was found. Use a PDF exported directly from a word processor.' },
         { status: 422 }
       );
     }
