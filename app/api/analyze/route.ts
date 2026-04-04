@@ -1,26 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
+import pdfParse from 'pdf-parse';
 
 // Vercel Hobby plan hard ceiling is 10s — do not exceed this.
 // llama-3.1-8b-instant + PDF extraction typically completes in 3-7s.
 // If you upgrade to Vercel Pro, you can raise this to 60.
 export const maxDuration = 10;
-
-// ── pdfjs-dist module init ───────────────────────────────────────────────────
-// Must be at module level (runs once at cold start, not per-request).
-// Wrapped in try-catch so a bad cold start gives a 500 with a real error message
-// instead of silently crashing the entire route.
-let pdfjs: any = null;
-let pdfjsInitError: string | null = null;
-try {
-  pdfjs = require('pdfjs-dist/legacy/build/pdf.js'); // eslint-disable-line
-  // Do NOT set GlobalWorkerOptions.workerSrc in Node.js/serverless.
-  // The legacy build's built-in fake worker handles text extraction automatically.
-  // Setting workerSrc = '' causes "Setting up fake worker failed" in Vercel.
-} catch (e: any) {
-  pdfjsInitError = e?.message ?? 'pdfjs-dist failed to load';
-  console.error('❌ pdfjs-dist failed to initialize at cold start:', pdfjsInitError);
-}
 
 // ── GROQ_API_KEY guard ───────────────────────────────────────────────────────
 // Fail fast at cold start so the error shows up in Vercel function logs immediately,
@@ -263,13 +248,7 @@ Return ONLY valid JSON:
 // ============================================================
 export async function POST(req: NextRequest) {
   try {
-    // ── 0. GUARD: module init checks ─────────────────────────
-    if (pdfjsInitError || !pdfjs) {
-      return NextResponse.json(
-        { error: 'PDF processing is temporarily unavailable. Please try again.' },
-        { status: 503 }
-      );
-    }
+    // ── 0. GUARD: env checks ─────────────────────────────────
     if (!process.env.GROQ_API_KEY) {
       console.error('❌ GROQ_API_KEY missing — rejecting request.');
       return NextResponse.json(
@@ -288,21 +267,10 @@ export async function POST(req: NextRequest) {
 
     // ── 2. EXTRACT TEXT ──────────────────────────────────────
     const bytes = await file.arrayBuffer();
-    const uint8Array = new Uint8Array(bytes);
+    const buffer = Buffer.from(bytes);
 
-    const loadingTask = pdfjs.getDocument({ data: uint8Array });
-    const pdfDoc = await loadingTask.promise;
-
-    let resumeText = '';
-    for (let i = 1; i <= pdfDoc.numPages; i++) {
-      const page = await pdfDoc.getPage(i);
-      const textContent = await page.getTextContent();
-      const pageText = textContent.items
-        .map((item: any) => ('str' in item ? item.str : ''))
-        .join(' ');
-      resumeText += pageText + '\n';
-    }
-    resumeText = resumeText.trim();
+    const pdfData = await pdfParse(buffer);
+    let resumeText = pdfData.text.trim();
 
     if (!resumeText || resumeText.length < 50) {
       return NextResponse.json(
