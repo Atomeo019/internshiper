@@ -1,14 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   images: { unoptimized: true },
-  experimental: {
-    // Keep pdfjs-dist out of the serverless bundle — let Node.js handle it at runtime.
-    serverComponentsExternalPackages: ['pdfjs-dist'],
-  },
   webpack: (config) => {
-    // pdfjs-dist optionally imports 'canvas' for Node.js rendering.
-    // We don't need canvas (text extraction only), so stub it out to prevent
-    // webpack from erroring on the missing native module.
+    // pdfjs-dist optionally imports 'canvas' for Node.js rendering (graphics only).
+    // We use pdfjs for text extraction only, so canvas is not needed.
+    // Aliasing to false tells webpack to replace 'canvas' with an empty stub,
+    // which prevents the "Module not found: Can't resolve 'canvas'" build error.
+    // pdfjs-dist's internal try-catch handles the empty stub gracefully.
     config.resolve.alias.canvas = false;
     return config;
   },

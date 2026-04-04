@@ -9,14 +9,14 @@ export const maxDuration = 60;
 // Wrapped in try-catch so a bad cold start gives a 500 with a real error message
 // instead of silently crashing the entire route.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-let pdfjs: typeof import('pdfjs-dist') | null = null;
+let pdfjs: any = null;
 let pdfjsInitError: string | null = null;
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   // Disable the worker thread — not needed for server-side text extraction.
   // pdfjs-dist handles missing canvas (required for rendering only) gracefully.
-  (pdfjs as any).GlobalWorkerOptions.workerSrc = '';
+  pdfjs.GlobalWorkerOptions.workerSrc = '';
 } catch (e: any) {
   pdfjsInitError = e?.message ?? 'pdfjs-dist failed to load';
   console.error('❌ pdfjs-dist failed to initialize at cold start:', pdfjsInitError);
