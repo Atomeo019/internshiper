@@ -8,6 +8,13 @@ const nextConfig = {
   // native require() handle it instead, which resolves relative paths correctly.
   experimental: {
     serverComponentsExternalPackages: ['pdfjs-dist'],
+    // pdfjs-dist loads pdf.worker.js at runtime via a relative require('./pdf.worker.js').
+    // Next.js output file tracing doesn't detect this dynamic internal require,
+    // so pdf.worker.js gets excluded from the Vercel deployment bundle.
+    // This forces Next.js to include all pdfjs legacy build files in the bundle.
+    outputFileTracingIncludes: {
+      '/api/analyze': ['./node_modules/pdfjs-dist/legacy/build/**/*.js'],
+    },
   },
   webpack: (config) => {
     // pdfjs-dist optionally imports 'canvas' for Node.js rendering (graphics only).
