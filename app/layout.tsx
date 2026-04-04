@@ -6,7 +6,7 @@ const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? 'https://internshipper.vercel.app'
+    process.env.NEXT_PUBLIC_SITE_URL ?? 'https://internshiper.vercel.app'
   ),
   title: 'ResumeRoast — Brutally Honest Resume Analysis',
   description:
@@ -15,7 +15,7 @@ export const metadata: Metadata = {
     title: 'ResumeRoast — Brutally Honest Resume Analysis',
     description:
       'Find out exactly why your resume gets filtered out. Scored against top-25% competitive tech internship standards.',
-    url: 'https://internshipper.vercel.app',
+    url: 'https://internshiper.vercel.app',
     siteName: 'ResumeRoast',
     locale: 'en_US',
     type: 'website',

@@ -94,7 +94,7 @@ export default function ResultsPage() {
     } catch {
       setSessionError(true);
     }
-  }, [router]);
+  }, []);
 
   if (sessionError) {
     return (

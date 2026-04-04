@@ -70,6 +70,14 @@ export default function DashboardPage() {
     setIsAnalyzing(true);
     setFileError(null);
 
+    // Abort the request if it hasn't completed within 12s.
+    // Vercel Hobby hard-kills functions at 10s — if that happens it returns a
+    // Vercel HTML 504 page, not JSON. Without this controller the spinner hangs
+    // forever because response.json() throws on HTML but the catch only fires
+    // after the default browser fetch timeout (which can be minutes).
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 12000);
+
     try {
       const formData = new FormData();
       formData.append('file', uploadedFile);
@@ -77,7 +85,18 @@ export default function DashboardPage() {
       const response = await fetch('/api/analyze', {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
+
+      clearTimeout(abortTimer);
+
+      // Vercel 504 / edge errors return HTML, not JSON — guard before parsing.
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!contentType.includes('application/json')) {
+        setFileError('Analysis timed out. Please try again — large PDFs occasionally take longer.');
+        setIsAnalyzing(false);
+        return;
+      }
 
       const result = await response.json();
 
@@ -98,8 +117,13 @@ export default function DashboardPage() {
       sessionStorage.setItem('analysis_truncated', result.truncated ? 'true' : 'false');
       router.push('/results');
 
-    } catch {
-      setFileError('Network error. Make sure you are connected and try again.');
+    } catch (err: any) {
+      clearTimeout(abortTimer);
+      if (err?.name === 'AbortError') {
+        setFileError('Analysis timed out. Please try again — large PDFs occasionally take longer.');
+      } else {
+        setFileError('Network error. Make sure you are connected and try again.');
+      }
       setIsAnalyzing(false);
     }
   };
@@ -260,7 +284,7 @@ export default function DashboardPage() {
 
           {isAnalyzing && (
             <p className="text-center text-slate-400 text-sm mt-3">
-              Extracting text and running AI analysis — this takes about 15 seconds
+              Extracting text and running AI analysis — usually done in under 10 seconds
             </p>
           )}
 
