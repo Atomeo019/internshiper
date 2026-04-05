@@ -12,8 +12,10 @@ import { NextRequest, NextResponse } from 'next/server';
 // regex also finds nothing → "All extraction methods failed [+2ms]".
 //
 // `require()` bypasses all ESM interop and gets the function directly.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const pdfParse: (buf: Buffer | Uint8Array, opts?: object) => Promise<{ text: string }> =
+  // require() instead of ESM import — avoids CJS/ESM interop where the default
+  // binding resolves to undefined and pdfParse(buffer) throws synchronously.
+  // eslint-disable-next-line
   require('pdf-parse');
 
 export const runtime = 'nodejs';
