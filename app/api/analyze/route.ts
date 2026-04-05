@@ -223,13 +223,20 @@ async function extractWithPdfjsDist(buffer: Buffer): Promise<string> {
   const pageTexts: string[] = [];
 
   for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
-    const page = await pdfDoc.getPage(pageNum);
-    const textContent = await page.getTextContent();
-    const pageText = (textContent.items as Array<{ str?: string }>)
-      .filter((item) => typeof item.str === 'string' && item.str.trim() !== '')
-      .map((item) => item.str!)
-      .join(' ');
-    pageTexts.push(pageText);
+    // Wrap each page individually — a font/canvas error on one page must NOT
+    // abort the whole extraction. Whatever text we already collected is still
+    // valid and should be returned rather than thrown away.
+    try {
+      const page = await pdfDoc.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const pageText = (textContent.items as Array<{ str?: string }>)
+        .filter((item) => typeof item.str === 'string' && item.str.trim() !== '')
+        .map((item) => item.str!)
+        .join(' ');
+      pageTexts.push(pageText);
+    } catch (pageErr: any) {
+      console.warn(`⚠️  pdfjs-dist: skipping page ${pageNum} — ${pageErr?.message ?? pageErr}`);
+    }
   }
 
   return pageTexts.join('\n').trim();
@@ -376,52 +383,78 @@ export async function POST(req: NextRequest) {
     //
     // Definite rejections (no fallback attempted):
     //   "bad decrypt" / "No password" → password-protected PDF
-    let resumeText: string;
+    // ── Extraction pipeline ───────────────────────────────────────────────
+    // Flat sequential chain: each method is guarded by `if (!resumeText)` so
+    // success of ANY method immediately stops the chain — no later step can
+    // overwrite a valid result. The "all failed" verdict is ONLY reached at
+    // the very end, after every method has had an independent attempt.
+    //
+    // Bugs this fixes vs. the old nested-catch design:
+    //  • pdfjs-dist timing out no longer triggers the "all failed" path —
+    //    the timeout error is caught per-method, not hoisted to the verdict
+    //  • a short-but-valid text result (< old 50-char threshold) is no longer
+    //    silently discarded; threshold is now 20 chars
+    //  • later failures cannot overwrite an earlier success because `resumeText`
+    //    is set exactly once and every subsequent block is skipped via the guard
+
+    let resumeText: string | null = null;
+
+    // ── Method 1: pdf-parse ──────────────────────────────────────────────
     try {
       const pdfData = await pdfParse(buffer);
-      resumeText = pdfData.text.trim();
-    } catch (parseErr: any) {
-      const msg: string = parseErr?.message ?? '';
-      console.warn('⚠️  pdf-parse failed:', msg);
-
-      // Password-protected PDFs: no point attempting fallbacks
+      const text = pdfData.text.trim();
+      if (text.length >= 20) {
+        resumeText = text;
+        console.log(`📄 [+${Date.now() - requestStart}ms] pdf-parse succeeded — ${text.length} chars`);
+      } else {
+        console.warn(`⚠️  pdf-parse returned ${text.length} chars — below 20-char threshold`);
+      }
+    } catch (e: any) {
+      const msg: string = e?.message ?? '';
+      console.warn(`⚠️  pdf-parse failed:`, msg);
+      // Password-protected: definitive rejection, no fallback makes sense
       if (msg.includes('decrypt') || msg.includes('password') || msg.includes('Password')) {
         return NextResponse.json(
           { error: 'Your PDF is password-protected. Remove the password and re-upload.' },
           { status: 422 }
         );
       }
-
-      // For any other parse error (XRef, Invalid structure, etc.) — the file
-      // passed the %PDF header check, so it IS a real PDF. Try the fallback chain
-      // before blaming the user's file.
-      // Budget: give pdfjs-dist at most 2500ms so Groq still has ~6s of runway.
-      console.warn(`⚠️  [+${Date.now() - requestStart}ms] Attempting pdfjs-dist v3.x fallback...`);
-      let fallbackText = '';
-      try {
-        fallbackText = await withTimeout(extractWithPdfjsDist(buffer), 2500, 'pdfjs-dist');
-        console.log(`✅ [+${Date.now() - requestStart}ms] pdfjs-dist fallback succeeded — ${fallbackText.length} chars`);
-      } catch (fallbackErr: any) {
-        console.warn(`⚠️  [+${Date.now() - requestStart}ms] pdfjs-dist fallback failed:`, fallbackErr?.message ?? fallbackErr);
-        // Last resort: regex scan over raw bytes (free, works on uncompressed PDFs)
-        fallbackText = extractPDFTextRaw(buffer);
-        if (fallbackText.length >= 50) {
-          console.log('✅ Raw regex fallback succeeded —', fallbackText.length, 'chars');
-        } else {
-          console.warn('⚠️  All extraction methods failed for this PDF');
-          return NextResponse.json(
-            { error: 'Could not extract text from your PDF. Try re-exporting it from Word, Google Docs, or Overleaf — this usually fixes the issue.' },
-            { status: 422 }
-          );
-        }
-      }
-
-      resumeText = fallbackText.trim();
     }
 
-    if (!resumeText || resumeText.length < 50) {
+    // ── Method 2: pdfjs-dist v3.x ────────────────────────────────────────
+    // Only attempted when method 1 produced nothing. The `if (!resumeText)`
+    // guard is what guarantees a successful method 1 is never overwritten.
+    if (!resumeText) {
+      console.warn(`⚠️  [+${Date.now() - requestStart}ms] Attempting pdfjs-dist v3.x fallback...`);
+      try {
+        const text = await withTimeout(extractWithPdfjsDist(buffer), 3500, 'pdfjs-dist');
+        if (text.length >= 20) {
+          resumeText = text;
+          console.log(`✅ [+${Date.now() - requestStart}ms] pdfjs-dist succeeded — ${text.length} chars`);
+        } else {
+          console.warn(`⚠️  pdfjs-dist returned ${text.length} chars — below 20-char threshold`);
+        }
+      } catch (e: any) {
+        // Catch is per-method only — does NOT trigger the "all failed" verdict.
+        // The verdict is at the end of the chain, not inside any individual catch.
+        console.warn(`⚠️  [+${Date.now() - requestStart}ms] pdfjs-dist failed:`, e?.message ?? e);
+      }
+    }
+
+    // ── Method 3: raw BT/ET regex ─────────────────────────────────────────
+    if (!resumeText) {
+      const text = extractPDFTextRaw(buffer);
+      if (text.length >= 20) {
+        resumeText = text;
+        console.log(`✅ [+${Date.now() - requestStart}ms] raw regex succeeded — ${text.length} chars`);
+      }
+    }
+
+    // ── All methods exhausted ─────────────────────────────────────────────
+    if (!resumeText) {
+      console.warn(`⚠️  [+${Date.now() - requestStart}ms] All extraction methods failed`);
       return NextResponse.json(
-        { error: 'Your PDF appears to be a scanned image — no machine-readable text was found. Use a PDF exported directly from a word processor.' },
+        { error: 'Could not extract text from your PDF. Try re-exporting it from Word, Google Docs, or Overleaf — this usually fixes the issue.' },
         { status: 422 }
       );
     }
