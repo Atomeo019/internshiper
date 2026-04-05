@@ -22,7 +22,21 @@ export const maxDuration = 10;
 let pdfjsLib: any = null;
 try {
   pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+  // MUST be an absolute path, not '' (empty string).
+  //
+  // '' is falsy → PDFWorker.workerSrc getter falls through to
+  // PDFWorkerUtil.fallbackWorkerSrc which pdfjs-dist sets to "./pdf.worker.js"
+  // (relative) at module load whenever it detects Node.js. That relative path
+  // is then used by _setupFakeWorkerGlobal: eval("require")("./pdf.worker.js")
+  // → MODULE_NOT_FOUND on Vercel because eval("require") can't resolve relative
+  // paths in the serverless sandbox.
+  //
+  // require.resolve() gives the absolute path at cold-start, which the getter's
+  // first branch (GlobalWorkerOptions.workerSrc is truthy) returns directly, so
+  // eval("require")("/absolute/path/pdf.worker.js") succeeds.
+  pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve(
+    'pdfjs-dist/legacy/build/pdf.worker.js'
+  );
   console.log('✅ pdfjs-dist loaded at module init');
 } catch (e: any) {
   console.warn('⚠️  pdfjs-dist unavailable at module init:', e.message);
@@ -209,13 +223,17 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 async function extractWithPdfjsDist(buffer: Buffer): Promise<string> {
   if (!pdfjsLib) throw new Error('pdfjs-dist not available in this deployment');
 
-  // Disable worker — in Node.js serverless there is no worker thread context.
-  // disableWorker: true keeps everything in the main thread.
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+  // workerSrc was set to an absolute path at module init — do NOT reset it to
+  // '' here. Empty string is falsy → PDFWorker.workerSrc getter falls through
+  // to fallbackWorkerSrc ("./pdf.worker.js", relative) → MODULE_NOT_FOUND.
+  //
+  // In Node.js, pdfjs-dist automatically sets PDFWorkerUtil.isWorkerDisabled=true
+  // and routes through _setupFakeWorkerGlobal, which loads the worker module via
+  // eval("require")(workerSrc). The absolute path set at init makes that succeed.
+  // disableWorker is a v1.x option not recognised by v3.x — omit it.
 
   const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(buffer),
-    disableWorker: true,
     verbosity: 0, // suppress canvas/rendering warnings irrelevant to text extraction
   });
 
