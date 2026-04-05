@@ -1,208 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Groq from 'groq-sdk';
 import pdfParse from 'pdf-parse';
-import type { AnalysisResult } from '@/lib/types';
 
-// Force Node.js runtime — pdf-parse requires Node.js APIs (Buffer, fs).
-// Edge runtime has neither, and would fail silently before even hitting the worker error.
+// Node.js runtime required — pdf-parse uses Buffer and fs APIs unavailable on Edge.
 export const runtime = 'nodejs';
 
-// Vercel Hobby plan hard ceiling is 10s — do not exceed this.
-// llama-3.1-8b-instant + PDF extraction typically completes in 3-7s.
-// If you upgrade to Vercel Pro, you can raise this to 60.
+// Vercel Hobby hard ceiling is 10s. Extraction alone should finish well inside 5s.
 export const maxDuration = 10;
 
-// ── pdfjs-dist module-level init ─────────────────────────────────────────────
-// Load once at cold start. Per-request require() of a 1 MB file eats ~500ms
-// of the 10s budget AND can deadlock on Vercel — pdfjs-dist's async canvas
-// polyfill init stalls in serverless, causing await loadingTask.promise to
-// hang forever with no throw, so the catch block never fires.
-// Initialising here lets us fail fast if the module isn't in the bundle AND
-// ensures every request reuses the already-loaded module.
-let pdfjsLib: any = null;
-try {
-  pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
-  // MUST be an absolute path, not '' (empty string).
-  //
-  // '' is falsy → PDFWorker.workerSrc getter falls through to
-  // PDFWorkerUtil.fallbackWorkerSrc which pdfjs-dist sets to "./pdf.worker.js"
-  // (relative) at module load whenever it detects Node.js. That relative path
-  // is then used by _setupFakeWorkerGlobal: eval("require")("./pdf.worker.js")
-  // → MODULE_NOT_FOUND on Vercel because eval("require") can't resolve relative
-  // paths in the serverless sandbox.
-  //
-  // require.resolve() gives the absolute path at cold-start, which the getter's
-  // first branch (GlobalWorkerOptions.workerSrc is truthy) returns directly, so
-  // eval("require")("/absolute/path/pdf.worker.js") succeeds.
-  pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve(
-    'pdfjs-dist/legacy/build/pdf.worker.js'
-  );
-  console.log('✅ pdfjs-dist loaded at module init');
-} catch (e: any) {
-  console.warn('⚠️  pdfjs-dist unavailable at module init:', e.message);
-}
-
-// ── GROQ_API_KEY guard ───────────────────────────────────────────────────────
-// Fail fast at cold start so the error shows up in Vercel function logs immediately,
-// instead of being swallowed by the per-request catch block.
-if (!process.env.GROQ_API_KEY) {
-  console.error(
-    '❌ GROQ_API_KEY is not set. ' +
-    'Add it to Vercel → Project → Settings → Environment Variables. ' +
-    'Every analysis request will fail until this is set.'
-  );
-}
-
-// AnalysisResult is defined in lib/types.ts — shared between server and client
-// without either side importing the other's module graph.
-
-// ============================================================
-// SYSTEM PROMPT — v5 (Phase 1, stacking caps, red flags enforced)
-// ============================================================
-const SYSTEM_PROMPT = `You are a senior technical recruiter who has reviewed tens of thousands of internship applications at top-tier tech companies — Google, Meta, Amazon, Microsoft, and high-growth startups. You have rejected 90% of applicants. You know exactly what separates candidates who get callbacks from those who don't.
-
-Your evaluation reflects cold, competitive reality. Encouragement that is not earned is deception. Do not soften scores. Do not hedge feedback. A resume that would be rejected by most competitive programs must score below 55.
-
----
-
-BENCHMARK
-Evaluate every resume against top-25% competitive tech internship programs. Not any internship — competitive programs.
-
----
-
-SCORING ARCHITECTURE
-
-content_score (0-100):
-  Skills relevance and demonstrated depth: 25%
-  Project quality, complexity, measurable impact: 25%
-  Experience strength and ownership: 20%
-  Resume clarity and structure: 15%
-  Role alignment: 15%
-
-ats_score (0-100): survival rate through automated filtering
-
-final_score = (content_score x 0.70) + (ats_score x 0.30)
-
----
-
-METRICS CHECK:
-Set "has_metrics" to true ONLY if the resume contains concrete numbers: %, $, users, performance gains, time saved, lines of code, test coverage. "Improved performance" does NOT count. If entirely vague, set false.
-
----
-
-CONTENT SCORING — HOW CAPS STACK
-
-Each hard rule that applies creates a CEILING. Multiple ceilings stack — take the LOWEST ceiling as the final cap.
-
-EXAMPLE: No metrics (ceiling 62) + AI mislabeling (ceiling 55) = content_score cannot exceed 55.
-
-The ceiling is a MAXIMUM, not a target. After applying the lowest ceiling, subtract all other deductions. The final content_score can and should be well below the ceiling.
-
-RULE 1 — No quantified metrics anywhere: ceiling 62. has_metrics must be false.
-RULE 2 — "Attended [meetings/stand-ups/events]" as a bullet: ceiling 57. THIS VIOLATION IS MANDATORY IN red_flags. Also deduct 5 from running score.
-RULE 3 — Passive language dominates ("worked on", "helped", "assisted", "was involved in"): deduct 2 per passive bullet, max deduction 12.
-RULE 4 — Project mislabeled as "AI/ML/blockchain" with zero actual implementation: ceiling 52. THIS VIOLATION IS MANDATORY IN red_flags. Also deduct 10 from running score.
-RULE 5 — No career objective or professional summary: deduct 5.
-RULE 6 — Vague bullet with no context, ownership, or result: deduct 2 per bullet.
-RULE 7 — No GitHub or portfolio for a technical candidate: deduct 5.
-RULE 8 — Resume over 1 page for under 2 years experience: deduct 3.
-RULE 9 — Skills listed but not demonstrated: goes in weak_skills, not strong_skills.
-
-HOW TO CALCULATE content_score:
-Step 1: Identify all violated rules and find the lowest ceiling among Rule 1, 2, 4. That is your maximum.
-Step 2: Start from that ceiling value.
-Step 3: Subtract deductions from Rule 3, 5, 6, 7, 8.
-Step 4: content_score = ceiling minus all deductions. Never go below 10.
-
----
-
-ATS HARD RULES (apply before calculating ats_score):
-RULE A: Two-column layout → ats_score ceiling 50
-RULE B: Graphics, icons, skill bars → deduct 20
-RULE C: Contact info in header/footer → deduct 15
-RULE D: Non-standard section names → deduct 15 per section
-RULE E: Tables for layout → deduct 15
-RULE F: Scanned/image PDF → ats_score ceiling 20
-RULE G: Acronyms only without spelling out (ML not Machine Learning) → deduct 5 per case
-RULE H: Missing role-critical keywords → deduct 5-15
-RULE I: Inconsistent date formatting → deduct 5
-RULE J: Over-styled formatting → deduct 10
-
----
-
-CONTENT SCORE CALIBRATION (use this to verify your score makes sense):
-0-40:  Would be rejected immediately by virtually all competitive programs
-41-50: Serious problems. Callbacks only from non-competitive companies.
-51-60: Below average. Competitive only for small/local internships.
-61-70: Average. Some mid-tier callbacks but struggles at top tier.
-71-80: Good. Competitive at mid-to-large tech, borderline FAANG.
-81-90: Strong. Competitive at most companies including top tier.
-91-100: Exceptional. Rare.
-
-ATS SCORE CALIBRATION:
-0-40:  Rejected or mangled before a human sees it
-41-60: Significant parsing issues
-61-75: Passes basic parsing, keyword gaps reduce visibility
-76-90: Good ATS compatibility
-91-100: Near-perfect
-
----
-
-PROFILE STRENGTH — STRICT MAPPING:
-final_score 0-55   → "Weak"
-final_score 56-65  → "Average"
-final_score 66-78  → "Good"
-final_score 79-100 → "Strong"
-
----
-
-ISSUES vs RED FLAGS — CRITICAL DISTINCTION:
-
-ISSUES: Problems fixable by editing. Poor word choice, missing sections, weak bullets. Goes in "issues" array.
-
-RED FLAGS: Items that cause AUTOMATIC REJECTION by ATS/recruiter OR destroy credibility in a technical interview. Goes in "red_flags" array. NEVER in issues only.
-
-MANDATORY RED FLAG TRIGGERS (if present, MUST appear in red_flags):
-- Any bullet saying "Attended [meetings/stand-ups/events/calls]" — wastes resume space, signals candidate doesn't know what matters
-- Any project named "AI/ML/blockchain" where the bullets reveal zero actual AI/ML/blockchain implementation — technical interviewers will expose this immediately
-- Skills listed that are completely unrelated to any project or experience (suggests fabrication)
-- Scanned PDF (ATS reads nothing)
-
-WRONG: Putting "Attended daily stand-up meetings" only in issues.
-CORRECT: Putting it in BOTH issues AND red_flags with label "Actively harmful bullet — remove immediately."
-
----
-
-SUMMARY LANGUAGE — MUST MATCH SCORE:
-
-final_score 0-50:   "This resume would be rejected by virtually all competitive tech internship programs. It is currently competitive only for non-technical or very small local companies..."
-final_score 51-60:  "This resume is below average for competitive tech internships. It may generate occasional callbacks from small companies but would be filtered out by most mid-tier and all top-tier programs..."
-final_score 61-70:  "This resume has average execution. It may generate callbacks from some mid-tier companies but is not competitive at top-tier tech companies..."
-final_score 71-80:  "This resume is competitive at mid-to-large tech companies but needs work to be competitive at FAANG level..."
-final_score 81-100: "This resume is strong and competitive across most tech companies..."
-
-Your summary MUST be consistent with the score. A 55 cannot say "competitive for mid-tier companies." A 48 cannot say "good foundation."
-
-COMPETITIVE_POSITION must also match: a sub-60 score means this resume competes only at small/local companies. State this directly.
-
----
-
-ANALYSIS RULES:
-- Quote the exact bullet when flagging issues or red flags.
-- Never say "consider adding." Say "add" or "remove."
-- action_plan ordered by highest impact first. Include example of what good looks like.
-- project_analysis and experience_analysis evaluate each entry individually by name.
-- If layout cannot be determined from text: state in ats_verdict "Formatting inferred from text only — visual layout risks cannot be confirmed."`;
-
-// ============================================================
-// PDF FALLBACK HELPERS
-// ============================================================
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
  * Race a promise against a hard deadline.
- * If the promise hasn't settled within `ms`, rejects with a timeout error.
- * The original promise is left hanging — Node.js will GC it when the
- * serverless instance is recycled (fine; we just need to return a response).
+ * The original promise is left to GC on timeout — fine for serverless.
  */
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
@@ -214,156 +23,64 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
- * Fallback 1: use pdfjs-dist v3.x (installed, much newer than pdf-parse's
- * bundled pdfjs v1.x). Handles ReportLab, Overleaf, and other PDFs that
- * trigger false-positive XRef errors in pdfjs v1.x.
- *
- * Uses the module-level pdfjsLib instance — not a per-request require().
+ * Decode PDF string escape sequences into readable text.
+ * Used by the regex fallback when reading raw BT/ET content streams.
  */
-async function extractWithPdfjsDist(buffer: Buffer): Promise<string> {
-  if (!pdfjsLib) throw new Error('pdfjs-dist not available in this deployment');
-
-  // workerSrc was set to an absolute path at module init — do NOT reset it to
-  // '' here. Empty string is falsy → PDFWorker.workerSrc getter falls through
-  // to fallbackWorkerSrc ("./pdf.worker.js", relative) → MODULE_NOT_FOUND.
-  //
-  // In Node.js, pdfjs-dist automatically sets PDFWorkerUtil.isWorkerDisabled=true
-  // and routes through _setupFakeWorkerGlobal, which loads the worker module via
-  // eval("require")(workerSrc). The absolute path set at init makes that succeed.
-  // disableWorker is a v1.x option not recognised by v3.x — omit it.
-
-  const loadingTask = pdfjsLib.getDocument({
-    data: new Uint8Array(buffer),
-    verbosity: 0, // suppress canvas/rendering warnings irrelevant to text extraction
-  });
-
-  const pdfDoc = await loadingTask.promise;
-  const pageTexts: string[] = [];
-
-  for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
-    // Wrap each page individually — a font/canvas error on one page must NOT
-    // abort the whole extraction. Whatever text we already collected is still
-    // valid and should be returned rather than thrown away.
-    try {
-      const page = await pdfDoc.getPage(pageNum);
-      const textContent = await page.getTextContent();
-      const pageText = (textContent.items as Array<{ str?: string }>)
-        .filter((item) => typeof item.str === 'string' && item.str.trim() !== '')
-        .map((item) => item.str!)
-        .join(' ');
-      pageTexts.push(pageText);
-    } catch (pageErr: any) {
-      console.warn(`⚠️  pdfjs-dist: skipping page ${pageNum} — ${pageErr?.message ?? pageErr}`);
-    }
-  }
-
-  return pageTexts.join('\n').trim();
+function decodePDFStr(s: string): string {
+  return s
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\(\d{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
 }
 
 /**
- * Fallback 2: naive BT/ET regex scan over the raw PDF bytes.
- * Works only on PDFs with uncompressed content streams but costs almost nothing.
- * ReportLab PDFs use FlateDecode, so this will typically return '' — but it's a
- * free last-resort attempt before we give up entirely.
+ * Regex fallback: scans raw PDF bytes for BT/ET text blocks.
+ * Only recovers text from uncompressed content streams (FlateDecode PDFs return '').
+ * Zero dependencies, cannot hang, never throws — safe as a last resort.
  */
-function extractPDFTextRaw(buffer: Buffer): string {
+function extractWithRegex(buffer: Buffer): string {
   const str = buffer.toString('latin1');
   const parts: string[] = [];
   const btEtRe = /BT([\s\S]*?)ET/g;
   let m: RegExpExecArray | null;
+
   while ((m = btEtRe.exec(str)) !== null) {
     const block = m[1];
-    // Tj — single string
+
+    // Tj operator — single string literal: (text) Tj
     const tjRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*Tj/g;
     let t: RegExpExecArray | null;
-    while ((t = tjRe.exec(block)) !== null) parts.push(decodePDFStr(t[1]));
-    // TJ — array of strings with kerning offsets
+    while ((t = tjRe.exec(block)) !== null) {
+      parts.push(decodePDFStr(t[1]));
+    }
+
+    // TJ operator — array with kerning offsets: [(text) offset (text)] TJ
     const tjArrRe = /\[([^\]]*)\]\s*TJ/g;
     while ((t = tjArrRe.exec(block)) !== null) {
       const strRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)/g;
       let s: RegExpExecArray | null;
-      while ((s = strRe.exec(t[1])) !== null) parts.push(decodePDFStr(s[1]));
+      while ((s = strRe.exec(t[1])) !== null) {
+        parts.push(decodePDFStr(s[1]));
+      }
     }
+
     parts.push('\n');
   }
+
   return parts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-function decodePDFStr(s: string): string {
-  return s
-    .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
-    .replace(/\\\(/g, '(').replace(/\\\)/g, ')').replace(/\\\\/g, '\\')
-    .replace(/\\(\d{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
-}
+// ── POST Handler ──────────────────────────────────────────────────────────────
 
-// ============================================================
-// USER PROMPT
-// ============================================================
-const MAX_RESUME_CHARS = 15000;
-
-const buildUserPrompt = (resumeText: string) => `Analyze this resume with brutal accuracy. Apply ALL scoring rules. Show your work in content_score calculation.
-
-RESUME:
-${resumeText.slice(0, MAX_RESUME_CHARS)}
-
-SCORING INSTRUCTIONS:
-1. Check for Rule 1 (no metrics), Rule 2 (attended meetings), Rule 4 (mislabeled AI/ML projects)
-2. Find the lowest ceiling from violated rules — that is your content_score maximum
-3. Subtract all other deductions from that ceiling
-4. Any Rule 2 or Rule 4 violation MUST appear in red_flags array — not just in issues
-5. Summary language MUST match the score range exactly
-
-Return ONLY valid JSON:
-{
-  "final_score": number,
-  "content_score": number,
-  "ats_score": number,
-  "has_metrics": boolean,
-  "profile_strength": "Weak" | "Average" | "Good" | "Strong",
-  "summary": "2-3 sentences — language MUST match score range. Sub-60 cannot claim mid-tier competitiveness.",
-  "strengths": ["specific strength referencing actual content — minimum 1"],
-  "issues": ["quote specific bullet, state recruiter impact — minimum 3"],
-  "red_flags": ["MANDATORY for attended-meetings bullets and mislabeled AI/ML projects — empty array only if truly none exist"],
-  "action_plan": ["highest impact first, include example of what good looks like — minimum 3"],
-  "skills_analysis": {
-    "strong_skills": ["demonstrated through projects or experience — not just listed"],
-    "weak_skills": ["listed but not demonstrated anywhere — interview liability"],
-    "missing_skills": ["absent skills competitive candidates typically have"]
-  },
-  "project_analysis": "evaluate each project by name — what is vague, what is missing, what would make it strong",
-  "experience_analysis": "evaluate each role — quote weakest bullet per role, write a strong rewrite",
-  "ats_breakdown": {
-    "parsing_risk": "None" | "Low" | "Medium" | "High" | "Critical",
-    "keyword_density": "None" | "Low" | "Adequate" | "Strong",
-    "formatting_issues": ["specific ATS-breaking element"],
-    "missing_keywords": ["keywords ATS filters search for"],
-    "ats_verdict": "one sentence — would this survive Greenhouse, Workday, or Lever?"
-  },
-  "upgrade_insight": {
-    "action": "single highest-ROI change in 24-48 hours",
-    "expected_score_increase": number,
-    "reason": "why this matters for both ATS and recruiter"
-  },
-  "competitive_position": "which tier this resume competes at right now — be direct, match the score"
-}`;
-
-// ============================================================
-// POST HANDLER
-// ============================================================
 export async function POST(req: NextRequest) {
+  const start = Date.now();
+
   try {
-    // ── 0. GUARD: env checks ─────────────────────────────────
-    if (!process.env.GROQ_API_KEY) {
-      console.error('❌ GROQ_API_KEY missing — rejecting request.');
-      return NextResponse.json(
-        { error: 'Service is not configured. Please contact support.' },
-        { status: 503 }
-      );
-    }
-
-    // ── 1. GET FILE ──────────────────────────────────────────
-    const requestStart = Date.now();
-
+    // ── 1. Read file ──────────────────────────────────────────────────────────
     const formData = await req.formData();
     const file = (formData.get('file') || formData.get('resume')) as File | null;
 
@@ -371,384 +88,100 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No file uploaded.' }, { status: 400 });
     }
 
-    // ── 2. EXTRACT TEXT ──────────────────────────────────────
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
-    console.log(`📥 [+${Date.now() - requestStart}ms] Received file: ${file.name} (${buffer.length} bytes)`);
+    console.log(`📥 Received file: "${file.name}" — ${buffer.length} bytes`);
 
-    // ── PDF signature check ──────────────────────────────────
-    // Every valid PDF starts with %PDF. Catch renamed files (.doc saved as .pdf,
-    // empty uploads, truncated transfers) before handing them to the parser.
+    // ── 2. Validate PDF signature ─────────────────────────────────────────────
+    // Every valid PDF begins with %PDF. Catch renamed .doc files, empty uploads,
+    // and truncated transfers before handing them to the parser.
     const header = buffer.slice(0, 5).toString('ascii');
     if (!header.startsWith('%PDF')) {
-      console.warn('⚠️  Rejected: file does not start with %PDF header');
+      console.warn('⚠️  Rejected: missing %PDF header');
       return NextResponse.json(
-        { error: 'The uploaded file is not a valid PDF. Please export your resume as a PDF and try again.' },
+        { error: 'The file is not a valid PDF. Export your resume as a PDF and try again.' },
         { status: 422 }
       );
     }
 
-    // ── Parse with targeted error handling ───────────────────
-    // Primary parser: pdf-parse (wraps pdfjs v1.x). Fast and handles most PDFs.
-    // Known limitation: pdfjs v1.x throws false-positive "bad XRef entry" on
-    //   certain valid PDFs (ReportLab, some Overleaf exports). These are NOT
-    //   corrupted — they just exercise parsing paths that v1.x never fixed.
-    //
-    // Fallback chain on primary failure:
-    //   1. pdfjs-dist v3.x  — modern, handles far more PDF variants
-    //   2. raw BT/ET regex  — last resort for uncompressed content streams
-    //   → only after all three fail do we return 422 to the user
-    //
-    // Definite rejections (no fallback attempted):
-    //   "bad decrypt" / "No password" → password-protected PDF
-    // ── Extraction pipeline ───────────────────────────────────────────────
-    // Flat sequential chain: each method is guarded by `if (!resumeText)` so
-    // success of ANY method immediately stops the chain — no later step can
-    // overwrite a valid result. The "all failed" verdict is ONLY reached at
-    // the very end, after every method has had an independent attempt.
-    //
-    // Bugs this fixes vs. the old nested-catch design:
-    //  • pdfjs-dist timing out no longer triggers the "all failed" path —
-    //    the timeout error is caught per-method, not hoisted to the verdict
-    //  • a short-but-valid text result (< old 50-char threshold) is no longer
-    //    silently discarded; threshold is now 20 chars
-    //  • later failures cannot overwrite an earlier success because `resumeText`
-    //    is set exactly once and every subsequent block is skipped via the guard
-
+    // ── 3. Extract text ───────────────────────────────────────────────────────
     let resumeText: string | null = null;
 
-    // ── Method 1: pdf-parse ──────────────────────────────────────────────
+    // ── Primary: pdf-parse ────────────────────────────────────────────────────
+    // Handles the vast majority of PDFs. Wrapped in a 4s timeout so a hung
+    // parser never burns the entire 10s Vercel budget.
     try {
-      const pdfData = await pdfParse(buffer);
+      const pdfData = await withTimeout(pdfParse(buffer), 4000, 'pdf-parse');
       const text = pdfData.text.trim();
+
       if (text.length >= 20) {
         resumeText = text;
-        console.log(`📄 [+${Date.now() - requestStart}ms] pdf-parse succeeded — ${text.length} chars`);
+        console.log(`✅ pdf-parse success — ${text.length} chars [+${Date.now() - start}ms]`);
       } else {
-        console.warn(`⚠️  pdf-parse returned ${text.length} chars — below 20-char threshold`);
+        console.warn(`⚠️  pdf-parse returned only ${text.length} chars — below 20-char threshold`);
       }
     } catch (e: any) {
       const msg: string = e?.message ?? '';
-      console.warn(`⚠️  pdf-parse failed:`, msg);
-      // Password-protected: definitive rejection, no fallback makes sense
-      if (msg.includes('decrypt') || msg.includes('password') || msg.includes('Password')) {
+      console.warn(`⚠️  pdf-parse failed: ${msg}`);
+
+      // Password-protected PDFs cannot be recovered by any fallback — reject early.
+      if (/decrypt|password/i.test(msg)) {
         return NextResponse.json(
-          { error: 'Your PDF is password-protected. Remove the password and re-upload.' },
+          { error: 'PDF is password-protected. Remove the password and try again.' },
           { status: 422 }
         );
       }
     }
 
-    // ── Method 2: pdfjs-dist v3.x ────────────────────────────────────────
-    // Only attempted when method 1 produced nothing. The `if (!resumeText)`
-    // guard is what guarantees a successful method 1 is never overwritten.
+    // ── Fallback: BT/ET regex scan ────────────────────────────────────────────
+    // Only attempted when pdf-parse produced nothing. Cannot hang — synchronous,
+    // zero I/O. Returns '' on FlateDecode-compressed PDFs (acceptable: the real
+    // failure already happened above and will be reported to the user).
     if (!resumeText) {
-      console.warn(`⚠️  [+${Date.now() - requestStart}ms] Attempting pdfjs-dist v3.x fallback...`);
+      console.warn('⚠️  Attempting regex fallback...');
       try {
-        const text = await withTimeout(extractWithPdfjsDist(buffer), 3500, 'pdfjs-dist');
+        const text = extractWithRegex(buffer);
+
         if (text.length >= 20) {
           resumeText = text;
-          console.log(`✅ [+${Date.now() - requestStart}ms] pdfjs-dist succeeded — ${text.length} chars`);
+          console.log(`✅ Regex fallback used — ${text.length} chars [+${Date.now() - start}ms]`);
         } else {
-          console.warn(`⚠️  pdfjs-dist returned ${text.length} chars — below 20-char threshold`);
+          console.warn(`⚠️  Regex fallback returned only ${text.length} chars — not enough`);
         }
       } catch (e: any) {
-        // Catch is per-method only — does NOT trigger the "all failed" verdict.
-        // The verdict is at the end of the chain, not inside any individual catch.
-        console.warn(`⚠️  [+${Date.now() - requestStart}ms] pdfjs-dist failed:`, e?.message ?? e);
+        console.warn(`⚠️  Regex fallback threw: ${e?.message ?? e}`);
       }
     }
 
-    // ── Method 3: raw BT/ET regex ─────────────────────────────────────────
+    // ── 4. Check result ───────────────────────────────────────────────────────
     if (!resumeText) {
-      const text = extractPDFTextRaw(buffer);
-      if (text.length >= 20) {
-        resumeText = text;
-        console.log(`✅ [+${Date.now() - requestStart}ms] raw regex succeeded — ${text.length} chars`);
-      }
-    }
-
-    // ── All methods exhausted ─────────────────────────────────────────────
-    if (!resumeText) {
-      console.warn(`⚠️  [+${Date.now() - requestStart}ms] All extraction methods failed`);
+      console.error(`❌ All extraction methods failed [+${Date.now() - start}ms]`);
       return NextResponse.json(
-        { error: 'Could not extract text from your PDF. Try re-exporting it from Word, Google Docs, or Overleaf — this usually fixes the issue.' },
+        { error: 'Could not read text from your PDF. Try re-exporting from Word, Google Docs, or Overleaf — this usually fixes it.' },
         { status: 422 }
       );
     }
 
-    const isTruncated = resumeText.length > MAX_RESUME_CHARS;
-    if (isTruncated) {
-      console.warn(`⚠️  Resume truncated: ${resumeText.length} chars → ${MAX_RESUME_CHARS}`);
-    }
-    console.log(`📄 [+${Date.now() - requestStart}ms] Parsed text: ${resumeText.length} chars`);
+    console.log(`📄 Final text length: ${resumeText.length} chars [+${Date.now() - start}ms]`);
 
-    // ── 3. CALL GROQ ─────────────────────────────────────────
-    // Budget: we have a 10s hard ceiling. Allow Groq up to 8000ms minus however
-    // long parsing already took, with a floor of 5000ms so we don't give it an
-    // unreasonably short window on fast parses.
-    const elapsed = Date.now() - requestStart;
-    const groqBudget = Math.max(5000, 8000 - elapsed);
-    console.log(`🤖 [+${elapsed}ms] Calling AI (budget: ${groqBudget}ms)...`);
+    // ── 5. Return extracted text ──────────────────────────────────────────────
+    // AI analysis is intentionally disabled here.
+    // This endpoint now returns raw extraction only — used to confirm the
+    // extraction pipeline is stable on Vercel before the Groq call is re-added.
+    // TODO: replace this response with the Groq analysis call once stable.
+    return NextResponse.json({
+      ok: true,
+      chars: resumeText.length,
+      elapsed_ms: Date.now() - start,
+      text: resumeText.slice(0, 500), // preview — remove slice when adding AI
+    });
 
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY! });
-
-    const completion = await withTimeout(
-      groq.chat.completions.create({
-        model: 'llama-3.1-8b-instant',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: buildUserPrompt(resumeText) },
-        ],
-        temperature: 0.1,
-        max_tokens: 2000,
-        response_format: { type: 'json_object' },
-      }),
-      groqBudget,
-      'Groq API'
-    );
-
-    console.log(`✅ [+${Date.now() - requestStart}ms] AI response received`);
-    const rawText = completion.choices[0]?.message?.content?.trim() ?? '';
-
-    // ── 4. PARSE JSON ────────────────────────────────────────
-    let analysis: AnalysisResult;
-    try {
-      const cleaned = rawText
-        .replace(/^```(?:json)?\n?/i, '')
-        .replace(/\n?```$/i, '')
-        .trim();
-      analysis = JSON.parse(cleaned);
-    } catch {
-      console.error('❌ Groq returned invalid JSON:', rawText);
-      return NextResponse.json(
-        { error: 'AI returned an invalid response. Please try again.' },
-        { status: 500 }
-      );
-    }
-
-    // ── 5. POST-PROCESSING LAYER ─────────────────────────────
-    analysis.red_flags = analysis.red_flags ?? [];
-
-    // ── CONTENT SCORE: Stacking Ceilings ────────────────────
-    // Each ceiling is a HARD MAX. Multiple violations stack — lowest wins.
-    // The ceiling is applied REGARDLESS of what the AI returned.
-
-    let contentCeiling = 100;
-
-    // Ceiling 1: No metrics anywhere → max 62
-    if (analysis.has_metrics === false) {
-      contentCeiling = Math.min(contentCeiling, 62);
-      console.log('⚠️  Content Ceiling 1: No metrics → max 62');
-    }
-
-    // Ceiling 2: "Attended meetings/stand-ups" bullet → max 57
-    const hasAttendedBullet = /attended.*?(meeting|stand.?up|standup|call|event)/i.test(resumeText);
-    if (hasAttendedBullet) {
-      contentCeiling = Math.min(contentCeiling, 57);
-      console.log('⚠️  Content Ceiling 2: Attended meetings bullet → max 57');
-      const alreadyFlagged = analysis.red_flags.some(f =>
-        f.toLowerCase().includes('attend') || f.toLowerCase().includes('stand-up') || f.toLowerCase().includes('meeting')
-      );
-      if (!alreadyFlagged) {
-        analysis.red_flags.push(
-          'Actively harmful bullet: "Attended daily stand-up meetings" wastes resume space and signals the candidate does not know what belongs on a resume. Remove immediately.'
-        );
-      }
-    }
-
-    // Ceiling 3: Project mislabeled as AI/ML with zero real implementation → max 52
-    // Applied whenever AI/ML keyword appears but no real implementation evidence exists.
-    const hasAIKeyword  = /\bai\b|ai\s+discord|ai\s+bot|machine\s+learning\s+project|ml\s+project/i.test(resumeText);
-    const hasRealAI     = /tensorflow|pytorch|openai|huggingface|llm|neural|sklearn|scikit|nlp|bert|gpt|langchain|transformers|model\.fit|model\.predict|train.*dataset|dataset.*train/i.test(resumeText);
-    if (hasAIKeyword && !hasRealAI) {
-      contentCeiling = Math.min(contentCeiling, 52);
-      console.log('⚠️  Content Ceiling 3: Mislabeled AI project → max 52');
-      const alreadyFlagged = analysis.red_flags.some(f =>
-        f.toLowerCase().includes('mislabel') || f.toLowerCase().includes('no ai') || f.toLowerCase().includes('no ml') ||
-        (f.toLowerCase().includes('ai') && f.toLowerCase().includes('implement'))
-      );
-      if (!alreadyFlagged) {
-        analysis.red_flags.push(
-          'Credibility risk: A project is labeled as an "AI" or "ML" project but the bullets show zero actual AI/ML implementation — no models, no training, no ML libraries (TensorFlow, PyTorch, scikit-learn, etc.). A technical interviewer will expose this in 30 seconds. Rename the project accurately or add real implementation.'
-        );
-      }
-    }
-
-    // Apply the final stacked ceiling
-    if (analysis.content_score > contentCeiling) {
-      console.log(`⚠️  content_score capped: ${analysis.content_score} → ${contentCeiling}`);
-      analysis.content_score = contentCeiling;
-    }
-
-    // ── ATS SCORE: Role-Aware Keyword Reality Check ─────────
-    // Detect the candidate's track first, then score against
-    // the keywords ATS systems actually look for in that track.
-    const resumeLower = resumeText.toLowerCase();
-
-    // ── Track detection signals ──────────────────────────────
-    const frontendSignals   = ['react', 'vue', 'angular', 'html', 'css', 'javascript', 'typescript', 'next', 'tailwind', 'webpack', 'vite', 'figma', 'dom', 'redux'];
-    const dataSignals       = ['pandas', 'numpy', 'jupyter', 'matplotlib', 'seaborn', 'sklearn', 'scikit', 'tensorflow', 'pytorch', 'data science', 'machine learning', 'deep learning', 'statistics', 'regression', 'classification', 'nlp', 'r language', 'rstudio'];
-    const backendSignals    = ['docker', 'kubernetes', 'aws', 'azure', 'gcp', 'ci/cd', 'linux', 'bash', 'terraform', 'nginx', 'microservice', 'redis', 'kafka', 'rabbitmq'];
-
-    const frontendScore = frontendSignals.filter(s => resumeLower.includes(s)).length;
-    const dataScore     = dataSignals.filter(s => resumeLower.includes(s)).length;
-    const backendScore  = backendSignals.filter(s => resumeLower.includes(s)).length;
-
-    // Determine dominant track (falls back to general SWE if no clear winner)
-    let track: 'frontend' | 'data' | 'backend' | 'general';
-    const maxSignal = Math.max(frontendScore, dataScore, backendScore);
-    if (maxSignal < 2) {
-      track = 'general';
-    } else if (frontendScore === maxSignal) {
-      track = 'frontend';
-    } else if (dataScore === maxSignal) {
-      track = 'data';
-    } else {
-      track = 'backend';
-    }
-    console.log(`🔍 Track detected: ${track} (frontend:${frontendScore} data:${dataScore} backend:${backendScore})`);
-
-    // ── Track-specific keyword lists ─────────────────────────
-    // Universal base — every tech candidate should have these
-
-    const trackKeywords: Record<string, string[]> = {
-      frontend: ['react', 'javascript', 'typescript', 'html', 'css', 'responsive', 'component', 'state', 'rest', 'git', 'api', 'test', 'agile', 'performance', 'accessibility'],
-      data:     ['python', 'sql', 'pandas', 'numpy', 'visualization', 'analysis', 'model', 'dataset', 'jupyter', 'git', 'api', 'test', 'agile', 'statistics', 'pipeline'],
-      backend:  ['rest', 'api', 'sql', 'docker', 'aws', 'cloud', 'ci/cd', 'linux', 'bash', 'jest', 'test', 'pytest', 'unit test', 'algorithm', 'agile', 'git'],
-      general:  ['rest', 'api', 'sql', 'git', 'agile', 'test', 'algorithm', 'data structure', 'cloud', 'linux'],
-    };
-
-    const criticalSWEKeywords = trackKeywords[track];
-    const presentKeywords  = criticalSWEKeywords.filter(kw => resumeLower.includes(kw));
-    const missingCount     = criticalSWEKeywords.length - presentKeywords.length;
-    const missingRatio     = missingCount / criticalSWEKeywords.length;
-
-    console.log(`📊 ATS keyword check: ${presentKeywords.length}/${criticalSWEKeywords.length} present (missing ratio: ${(missingRatio * 100).toFixed(0)}%)`);
-
-    // ATS ceiling based on keyword gaps
-    // Threshold lowered to 0.68 — a resume missing 68%+ of critical SWE keywords
-    // does NOT have "adequate" keyword coverage at competitive programs.
-    let atsCeiling = 100;
-    if (missingRatio > 0.68) atsCeiling = Math.min(atsCeiling, 45);  // >68% missing → very low
-    else if (missingRatio > 0.50) atsCeiling = Math.min(atsCeiling, 58); // >50% missing → below average
-    else if (missingRatio > 0.32) atsCeiling = Math.min(atsCeiling, 70); // >32% missing → moderate
-
-    if (analysis.ats_score > atsCeiling) {
-      console.log(`⚠️  ats_score capped: ${analysis.ats_score} → ${atsCeiling} (${(missingRatio * 100).toFixed(0)}% critical keywords missing)`);
-      analysis.ats_score = atsCeiling;
-    }
-
-    // Override AI's ATS breakdown fields with server-computed reality.
-    // The AI inflates keyword_density and underreports missing_keywords.
-    const missingKeywords = criticalSWEKeywords.filter(kw => !resumeLower.includes(kw));
-    if (!analysis.ats_breakdown) {
-      analysis.ats_breakdown = {
-        parsing_risk: 'Medium',
-        keyword_density: 'Low',
-        formatting_issues: [],
-        missing_keywords: [],
-        ats_verdict: 'Unable to determine ATS compatibility.',
-      };
-    }
-    // Keyword density label based on actual scan
-    if (missingRatio > 0.68)       analysis.ats_breakdown.keyword_density = 'Low';
-    else if (missingRatio > 0.50)  analysis.ats_breakdown.keyword_density = 'Low';
-    else if (missingRatio > 0.32)  analysis.ats_breakdown.keyword_density = 'Adequate';
-    else                           analysis.ats_breakdown.keyword_density = 'Strong';
-    // Inject actual missing keywords (server-verified, not AI guesses)
-    const formattedMissing = missingKeywords.map(kw => kw.toUpperCase());
-    if (formattedMissing.length > 0) {
-      analysis.ats_breakdown.missing_keywords = formattedMissing;
-    }
-    // Override ats_verdict if score was heavily capped
-    if (atsCeiling <= 45) {
-      analysis.ats_breakdown.ats_verdict =
-        `Critical keyword gap: ${missingKeywords.length} of ${criticalSWEKeywords.length} standard SWE keywords absent. ` +
-        `ATS systems at competitive companies will deprioritize or filter this resume before a human sees it.`;
-    } else if (atsCeiling <= 58) {
-      analysis.ats_breakdown.ats_verdict =
-        `Significant keyword gap: ${missingKeywords.length} of ${criticalSWEKeywords.length} standard SWE keywords missing. ` +
-        `Resume may pass basic ATS filtering at small companies but will rank poorly at mid-tier and above.`;
-    }
-
-    // ── FINAL SCORE: Recalculate — never trust AI math ──────
-    analysis.final_score = Math.round(
-      (analysis.content_score * 0.70) + (analysis.ats_score * 0.30)
-    );
-
-    // ── PROFILE STRENGTH: Enforce strict mapping ─────────────
-    const fs = analysis.final_score;
-    if (fs <= 55)       analysis.profile_strength = 'Weak';
-    else if (fs <= 65)  analysis.profile_strength = 'Average';
-    else if (fs <= 78)  analysis.profile_strength = 'Good';
-    else                analysis.profile_strength = 'Strong';
-
-    // ── SUMMARY: Clamp language to score reality ─────────────
-    const softPhrases = [
-      'competitive for mid-tier', 'competitive at mid', 'good foundation',
-      'strong base', 'well-positioned', 'competitive for most',
-    ];
-    const summaryLower2 = (analysis.summary ?? '').toLowerCase();
-    const isSoftSummary = softPhrases.some(p => summaryLower2.includes(p));
-    if (analysis.final_score < 58 && isSoftSummary) {
-      analysis.summary =
-        `This resume scores ${analysis.final_score}/100 against competitive tech internship standards — below average. ` +
-        `It would be filtered out by most mid-tier and all top-tier programs. ` +
-        `Callbacks are realistic only at small or non-competitive companies without significant improvements.`;
-    }
-
-    // Rule 5: Defensive defaults
-    analysis.red_flags           = analysis.red_flags           ?? [];
-    analysis.issues              = analysis.issues              ?? [];
-    analysis.strengths           = analysis.strengths           ?? [];
-    analysis.action_plan         = analysis.action_plan         ?? [];
-    analysis.competitive_position= analysis.competitive_position ?? '';
-
-    if (!analysis.skills_analysis) {
-      analysis.skills_analysis = { strong_skills: [], weak_skills: [], missing_skills: [] };
-    }
-    analysis.skills_analysis.weak_skills    = analysis.skills_analysis.weak_skills    ?? [];
-    analysis.skills_analysis.strong_skills  = analysis.skills_analysis.strong_skills  ?? [];
-    analysis.skills_analysis.missing_skills = analysis.skills_analysis.missing_skills ?? [];
-
-    // ats_breakdown already initialized and enriched above — no-op here
-
-    console.log(`✅ Analysis complete — content: ${analysis.content_score} | ats: ${analysis.ats_score} | final: ${analysis.final_score} | strength: ${analysis.profile_strength} | red_flags: ${analysis.red_flags.length}`);
-
-    // ── 6. RETURN ─────────────────────────────────────────────
-    return NextResponse.json({ success: true, analysis, truncated: isTruncated });
-
-  } catch (error: any) {
-    // Log the full error server-side for Vercel function logs
-    console.error('❌ Analyze error:', error?.message ?? error);
-
-    // Timeout from withTimeout() — budget exhausted before a response was ready
-    if (error?.message?.includes('timed out after')) {
-      return NextResponse.json(
-        { error: 'Analysis took too long to complete. Please try again — this is usually a temporary issue.' },
-        { status: 504 }
-      );
-    }
-
-    // Groq auth errors (missing/invalid key)
-    if (error?.status === 401 || error?.message?.includes('API key')) {
-      return NextResponse.json(
-        { error: 'AI service authentication failed. Please contact support.' },
-        { status: 503 }
-      );
-    }
-    // Groq rate limiting (shouldn't reach here since 429 is handled above, but belt-and-suspenders)
-    if (error?.status === 429) {
-      return NextResponse.json(
-        { error: 'High demand right now. Please try again in a few minutes.' },
-        { status: 429 }
-      );
-    }
+  } catch (e: any) {
+    // Top-level catch — should never fire, but guarantees we always send a response.
+    console.error('❌ Unhandled error in /api/analyze:', e?.message ?? e);
     return NextResponse.json(
-      { error: 'Something went wrong. Please try again.' },
+      { error: 'Unexpected server error. Please try again.' },
       { status: 500 }
     );
   }
 }
-
