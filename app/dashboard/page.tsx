@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import type { APIResponse } from '@/lib/types';
 import Link from 'next/link';
 import {
   Sparkles,
@@ -28,7 +29,14 @@ export default function DashboardPage() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // `status` drives all post-submission UI. Replaces the boolean `isAnalyzing`
+  // so the button disappears after success instead of staying clickable.
+  const [status, setStatus] = useState<'idle' | 'analyzing' | 'done'>('idle');
+  const [extractedPreview, setExtractedPreview] = useState<string | null>(null);
+  // Synchronous ref lock — React state updates are async so a boolean state flag
+  // can be read as `false` by a second click before the first setState commits.
+  // The ref write is immediate and visible to any concurrent call.
+  const isAnalyzingRef = useRef(false);
   const router = useRouter();
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -43,11 +51,17 @@ export default function DashboardPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    // Use the ref — not status state — because state reads here are stale closures.
+    // A drop during an in-flight request would swap uploadedFile while the fetch
+    // is bound to the old FormData, causing preview text to mismatch the filename.
+    if (isAnalyzingRef.current) return;
     const file = e.dataTransfer.files[0];
     if (!file) return;
     const error = validateFile(file);
     if (error) { setFileError(error); return; }
     setFileError(null);
+    setExtractedPreview(null);
+    setStatus('idle');
     setUploadedFile(file);
   };
 
@@ -61,14 +75,24 @@ export default function DashboardPage() {
       return;
     }
     setFileError(null);
+    setExtractedPreview(null);
+    setStatus('idle');
     setUploadedFile(file);
   };
 
-  const handleAnalyze = async () => {
-    if (!uploadedFile || isAnalyzing) return;
+  // Single entry point for all analysis triggers (button click AND drag-drop).
+  // Centralising here means the lock, cleanup, and state transitions can never
+  // drift between the two call sites.
+  const startAnalysis = async (file: File) => {
+    // Fix 1 — synchronous ref check. React state (`status`) is async: a second
+    // click can read stale `idle` before the first setState('analyzing') commits.
+    // The ref write on the next line is immediate and shared across closures.
+    if (isAnalyzingRef.current) return;
+    isAnalyzingRef.current = true;
 
-    setIsAnalyzing(true);
+    setStatus('analyzing');
     setFileError(null);
+    setExtractedPreview(null); // Fix 3 — clear stale preview before new request
 
     // Abort the request if it hasn't completed within 12s.
     // Vercel Hobby hard-kills functions at 10s — if that happens it returns a
@@ -80,7 +104,7 @@ export default function DashboardPage() {
 
     try {
       const formData = new FormData();
-      formData.append('file', uploadedFile);
+      formData.append('file', file); // uses the parameter, not captured state
 
       const response = await fetch('/api/analyze', {
         method: 'POST',
@@ -88,43 +112,95 @@ export default function DashboardPage() {
         signal: controller.signal,
       });
 
-      clearTimeout(abortTimer);
-
       // Vercel 504 / edge errors return HTML, not JSON — guard before parsing.
       const contentType = response.headers.get('content-type') ?? '';
       if (!contentType.includes('application/json')) {
         setFileError('Analysis timed out. Please try again — large PDFs occasionally take longer.');
-        setIsAnalyzing(false);
+        setStatus('idle');
         return;
       }
 
-      const result = await response.json();
-
-      if (response.status === 429) {
-        setFileError(result.error || 'High demand right now. Please try again in a few minutes.');
-        setIsAnalyzing(false);
+      // Fix 6 — separate try/catch around JSON parse. Content-type can be
+      // application/json while the body is still malformed (CDN error pages).
+      // Without this, a SyntaxError propagates to the outer catch and shows
+      // "Network error" which is the wrong message for this failure.
+      let data: APIResponse;
+      try {
+        data = await response.json();
+      } catch {
+        setFileError('Server returned an unreadable response. Please try again.');
+        setStatus('idle');
         return;
       }
 
-      if (!response.ok || !result.success) {
-        setFileError(result.error || 'Analysis failed. Please try again.');
-        setIsAnalyzing(false);
+      // Debug: confirm exact response shape — remove after AI is stable
+      console.log('API response:', data);
+
+      // HTTP-level errors (400, 422, 429, 500) — all return ErrorResponse shape
+      if (!response.ok) {
+        // Safely extract error message — data.ok is false for all backend errors
+        const msg = !data.ok ? data.error : null;
+        if (response.status === 429) {
+          setFileError(msg ?? 'High demand right now. Please try again in a few minutes.');
+        } else {
+          setFileError(msg ?? 'Analysis failed. Please try again.');
+        }
+        setStatus('idle');
         return;
       }
 
-      sessionStorage.setItem('resume_uploaded', 'true');
-      sessionStorage.setItem('analysis_result', JSON.stringify(result.analysis));
-      sessionStorage.setItem('analysis_truncated', result.truncated ? 'true' : 'false');
-      router.push('/results');
+      // API-level failure on a 200 (defensive — backend should not do this, but guard it)
+      if (!data.ok) {
+        setFileError(data.error ?? 'Analysis failed. Please try again.');
+        setStatus('idle');
+        return;
+      }
+
+      // Branch on mode — the single source of truth for what shape to expect
+      if (data.mode === 'extraction') {
+        if (!data.preview_text) {
+          // ok:true + mode:extraction but no text — backend emitted a partial response
+          setFileError('Extraction returned no text. Try re-exporting your PDF.');
+          setStatus('idle');
+          return;
+        }
+        setExtractedPreview(data.preview_text);
+        setStatus('done'); // Fix 5 — 'done' hides the Analyze button
+        return;
+      }
+
+      if (data.mode === 'analysis') {
+        if (!data.analysis) {
+          // mode declares analysis but field is absent — backend bug, surface it cleanly
+          setFileError('Analysis result was incomplete. Please try again.');
+          setStatus('idle');
+          return;
+        }
+        sessionStorage.setItem('resume_uploaded', 'true');
+        sessionStorage.setItem('analysis_result', JSON.stringify(data.analysis));
+        sessionStorage.setItem('analysis_truncated', data.truncated ? 'true' : 'false');
+        router.push('/results');
+        return;
+      }
+
+      // Unknown mode — future-proofing: don't crash silently if backend adds a new mode
+      setFileError('Unexpected response from server. Please try again.');
+      setStatus('idle');
 
     } catch (err: any) {
-      clearTimeout(abortTimer);
       if (err?.name === 'AbortError') {
         setFileError('Analysis timed out. Please try again — large PDFs occasionally take longer.');
       } else {
         setFileError('Network error. Make sure you are connected and try again.');
       }
-      setIsAnalyzing(false);
+      setStatus('idle');
+    } finally {
+      // Fix 2 — guaranteed cleanup regardless of which path exits the try block.
+      // Previously clearTimeout was duplicated in try + catch; a thrown exception
+      // in the try block after the fetch resolved would skip the try-side call
+      // and leak the timer until it fired and aborted a completed request.
+      clearTimeout(abortTimer);
+      isAnalyzingRef.current = false;
     }
   };
 
@@ -220,7 +296,7 @@ export default function DashboardPage() {
               accept=".pdf"
               onChange={handleFileChange}
               className="hidden"
-              disabled={isAnalyzing}
+              disabled={status === 'analyzing'}
             />
 
             {!uploadedFile ? (
@@ -249,9 +325,9 @@ export default function DashboardPage() {
                     </p>
                   </div>
                 </div>
-                {!isAnalyzing && (
+                {status !== 'analyzing' && (
                   <button
-                    onClick={() => setUploadedFile(null)}
+                    onClick={() => { setUploadedFile(null); setStatus('idle'); setExtractedPreview(null); }}
                     className="w-8 h-8 rounded-full hover:bg-slate-700 flex items-center justify-center transition-colors flex-shrink-0 ml-2"
                   >
                     <X className="w-5 h-5 text-slate-400" />
@@ -265,24 +341,47 @@ export default function DashboardPage() {
             <p className="mt-3 text-sm text-red-400 text-center">{fileError}</p>
           )}
 
-          {uploadedFile && (
+          {extractedPreview && (
+            <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-xl">
+              <p className="text-sm font-semibold text-green-400 mb-2">✓ Resume text extracted — AI scoring coming shortly</p>
+              <p className="text-xs text-slate-400 whitespace-pre-wrap line-clamp-4">{extractedPreview}</p>
+              <p className="text-xs text-slate-500 mt-2">This is a preview of the extracted text. Full analysis will appear here once AI is enabled.</p>
+            </div>
+          )}
+
+          {/* Fix 5 — status-driven button. `idle` = ready, `analyzing` = locked
+               spinner, `done` = Analyze Again (resets to idle so user can retry
+               without having to pick a new file). The Analyze button is NEVER
+               shown while `done` — that was the bug causing the stale re-click. */}
+          {uploadedFile && status === 'idle' && (
             <button
-              onClick={handleAnalyze}
-              disabled={isAnalyzing}
-              className="w-full mt-6 py-4 rounded-lg gradient-purple text-white font-semibold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-purple-500/30 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-3"
+              onClick={() => startAnalysis(uploadedFile)}
+              className="w-full mt-6 py-4 rounded-lg gradient-purple text-white font-semibold text-lg hover:opacity-90 transition-opacity shadow-lg shadow-purple-500/30 flex items-center justify-center gap-3"
             >
-              {isAnalyzing ? (
-                <>
-                  <Loader className="w-5 h-5 animate-spin" />
-                  Analyzing your resume...
-                </>
-              ) : (
-                'Analyze My Resume'
-              )}
+              Analyze My Resume
             </button>
           )}
 
-          {isAnalyzing && (
+          {status === 'analyzing' && (
+            <button
+              disabled
+              className="w-full mt-6 py-4 rounded-lg gradient-purple text-white font-semibold text-lg opacity-60 cursor-not-allowed flex items-center justify-center gap-3"
+            >
+              <Loader className="w-5 h-5 animate-spin" />
+              Analyzing your resume...
+            </button>
+          )}
+
+          {uploadedFile && status === 'done' && (
+            <button
+              onClick={() => setStatus('idle')}
+              className="w-full mt-6 py-4 rounded-lg border border-purple-500/40 text-purple-400 font-semibold text-lg hover:bg-purple-500/10 transition-colors flex items-center justify-center gap-3"
+            >
+              Analyze Again
+            </button>
+          )}
+
+          {status === 'analyzing' && (
             <p className="text-center text-slate-400 text-sm mt-3">
               Extracting text and running AI analysis — usually done in under 10 seconds
             </p>

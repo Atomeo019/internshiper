@@ -20,15 +20,18 @@ import {
   Briefcase,
 } from 'lucide-react';
 import type { AnalysisResult } from '@/lib/types';
+import { normalizeAnalysisResult } from '@/lib/normalize';
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
+// Default case returns a valid object so profileColors.bg never crashes.
 function getProfileColors(strength: AnalysisResult['profile_strength']) {
   switch (strength) {
     case 'Strong':  return { text: 'text-green-400',  border: 'border-green-500/20',  bg: 'bg-green-500/10'  };
     case 'Good':    return { text: 'text-yellow-400', border: 'border-yellow-500/20', bg: 'bg-yellow-500/10' };
     case 'Average': return { text: 'text-orange-400', border: 'border-orange-500/20', bg: 'bg-orange-500/10' };
     case 'Weak':    return { text: 'text-red-400',    border: 'border-red-500/20',    bg: 'bg-red-500/10'    };
+    default:        return { text: 'text-slate-400',  border: 'border-slate-500/20',  bg: 'bg-slate-500/10'  };
   }
 }
 
@@ -58,43 +61,71 @@ function ScoreBar({ label, score, color }: { label: string; score: number; color
   );
 }
 
-// ── Page ─────────────────────────────────────────────────────────────────────
+// ── Empty state for array sections ────────────────────────────────────────────
+function EmptyState({ message }: { message: string }) {
+  return (
+    <p className="text-slate-500 text-sm italic">{message}</p>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function ResultsPage() {
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
-  const [progress, setProgress] = useState(0);
+  const [analysis, setAnalysis]       = useState<AnalysisResult | null>(null);
+  const [progress, setProgress]       = useState(0);
   const [sessionError, setSessionError] = useState(false);
   const [isTruncated, setIsTruncated] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
     try {
-      const didUpload = sessionStorage.getItem('resume_uploaded');
+      // The dashboard stores 'analysis_result' before pushing to this page.
+      // We no longer check 'resume_uploaded' — it was never set by the dashboard,
+      // so that check permanently blocked access to this page.
       const stored = sessionStorage.getItem('analysis_result');
 
-      if (!didUpload || !stored) {
+      if (!stored) {
         setSessionError(true);
         return;
       }
 
-      const parsed: AnalysisResult = JSON.parse(stored);
-      setAnalysis(parsed);
+      // Parse then normalize — normalizeAnalysisResult is the contract enforcer.
+      // Even if sessionStorage was tampered with or AI output was unexpected,
+      // every field is guaranteed to be the correct type after this call.
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(stored);
+      } catch {
+        setSessionError(true);
+        return;
+      }
+
+      const safe = normalizeAnalysisResult(parsed);
+      setAnalysis(safe);
       setIsTruncated(sessionStorage.getItem('analysis_truncated') === 'true');
 
-    // Animate score circle to final_score
-    const target = parsed.final_score;
-    const progressInterval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= target) { clearInterval(progressInterval); return target; }
-        return prev + 2;
-      });
-    }, 30);
+      // Animate the score circle from 0 to final_score.
+      // final_score is guaranteed to be an integer in [0, 100] after normalization,
+      // so this interval is guaranteed to terminate.
+      const target = safe.final_score; // already clamped to [0, 100]
+      const progressInterval = setInterval(() => {
+        setProgress((prev) => {
+          if (prev >= target) {
+            clearInterval(progressInterval);
+            return target;
+          }
+          // Math.min prevents overshooting target (e.g. prev=71, target=72, step=2)
+          return Math.min(prev + 2, target);
+        });
+      }, 30);
 
-    return () => clearInterval(progressInterval);
+      return () => clearInterval(progressInterval);
     } catch {
       setSessionError(true);
     }
   }, []);
+
+  // ── Error state ──────────────────────────────────────────────────────────────
 
   if (sessionError) {
     return (
@@ -105,7 +136,8 @@ export default function ResultsPage() {
           </div>
           <h2 className="text-2xl font-bold mb-3">Session Expired</h2>
           <p className="text-slate-400 mb-6 leading-relaxed">
-            Your results couldn&apos;t be loaded — this usually happens on private browsing or when navigating directly to this page. Upload your resume again to get your analysis.
+            Your results couldn&apos;t be loaded — this usually happens in private browsing
+            or when navigating directly to this page. Upload your resume again to get your analysis.
           </p>
           <button
             onClick={() => router.push('/dashboard')}
@@ -117,6 +149,8 @@ export default function ResultsPage() {
       </div>
     );
   }
+
+  // ── Loading state ─────────────────────────────────────────────────────────────
 
   if (!analysis) {
     return (
@@ -130,8 +164,13 @@ export default function ResultsPage() {
     );
   }
 
+  // After normalization every field is guaranteed to be safe — no optional
+  // chaining or null guards needed in the render tree below, but we keep the
+  // array .length checks so empty sections are hidden rather than rendering
+  // blank cards.
+
   const profileColors = getProfileColors(analysis.profile_strength);
-  const hasRedFlags   = analysis.red_flags?.length > 0;
+  const hasRedFlags   = analysis.red_flags.length > 0;
 
   return (
     <div className="min-h-screen bg-slate-950">
@@ -166,7 +205,9 @@ export default function ResultsPage() {
           <div className="flex items-start gap-3 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl">
             <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
             <p className="text-yellow-300 text-sm">
-              <span className="font-semibold">Large resume detected.</span> Your file exceeded the analysis limit so only the first portion was evaluated. Keep your resume to 1 page — competitive internship programs prefer it and this tool is optimised for that.
+              <span className="font-semibold">Large resume detected.</span> Your file exceeded the analysis
+              limit so only the first portion was evaluated. Keep your resume to 1 page — competitive
+              internship programs prefer it and this tool is optimised for that.
             </p>
           </div>
         )}
@@ -235,14 +276,16 @@ export default function ResultsPage() {
           {/* Issues + Action Plan */}
           <div className="lg:col-span-2 space-y-4 md:space-y-6">
 
-            {/* Red Flags — prominent warning block */}
+            {/* Red Flags */}
             {hasRedFlags && (
               <div className="bg-red-950/40 border-2 border-red-500/40 rounded-2xl p-6">
                 <div className="flex items-center gap-3 mb-4">
                   <ShieldAlert className="w-6 h-6 text-red-400" />
                   <h2 className="text-xl font-bold text-red-300">Red Flags — Fix Before Submitting</h2>
                 </div>
-                <p className="text-red-400/70 text-sm mb-4">These will cause immediate rejection or destroy your credibility in a technical interview.</p>
+                <p className="text-red-400/70 text-sm mb-4">
+                  These will cause immediate rejection or destroy your credibility in a technical interview.
+                </p>
                 <div className="space-y-3">
                   {analysis.red_flags.map((flag, i) => (
                     <div key={i} className="flex items-start gap-3 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
@@ -261,14 +304,18 @@ export default function ResultsPage() {
                 <h2 className="text-2xl font-bold">Top Issues to Fix</h2>
               </div>
               <div className="space-y-3">
-                {analysis.issues.map((issue, i) => (
-                  <div key={i} className="flex items-start gap-3 p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
-                    <div className="w-6 h-6 rounded-full bg-orange-500/10 border border-orange-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <span className="text-xs font-bold text-orange-400">{i + 1}</span>
+                {analysis.issues.length > 0 ? (
+                  analysis.issues.map((issue, i) => (
+                    <div key={i} className="flex items-start gap-3 p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
+                      <div className="w-6 h-6 rounded-full bg-orange-500/10 border border-orange-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <span className="text-xs font-bold text-orange-400">{i + 1}</span>
+                      </div>
+                      <p className="text-slate-300 text-sm">{issue}</p>
                     </div>
-                    <p className="text-slate-300 text-sm">{issue}</p>
-                  </div>
-                ))}
+                  ))
+                ) : (
+                  <EmptyState message="No major issues detected." />
+                )}
               </div>
             </div>
 
@@ -279,14 +326,18 @@ export default function ResultsPage() {
                 <h2 className="text-2xl font-bold">Action Plan</h2>
               </div>
               <div className="space-y-3">
-                {analysis.action_plan.map((action, i) => (
-                  <div key={i} className="flex items-start gap-3 p-4 bg-purple-500/5 border border-purple-500/20 rounded-lg hover:bg-purple-500/10 transition-colors">
-                    <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <span className="text-xs font-bold text-purple-300">{i + 1}</span>
+                {analysis.action_plan.length > 0 ? (
+                  analysis.action_plan.map((action, i) => (
+                    <div key={i} className="flex items-start gap-3 p-4 bg-purple-500/5 border border-purple-500/20 rounded-lg hover:bg-purple-500/10 transition-colors">
+                      <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center flex-shrink-0 mt-0.5">
+                        <span className="text-xs font-bold text-purple-300">{i + 1}</span>
+                      </div>
+                      <p className="text-slate-300 text-sm">{action}</p>
                     </div>
-                    <p className="text-slate-300 text-sm">{action}</p>
-                  </div>
-                ))}
+                  ))
+                ) : (
+                  <EmptyState message="No action items generated." />
+                )}
               </div>
             </div>
 
@@ -342,7 +393,7 @@ export default function ResultsPage() {
           </div>
 
           <div className="grid md:grid-cols-2 gap-6">
-            {analysis.ats_breakdown.formatting_issues?.length > 0 && (
+            {analysis.ats_breakdown.formatting_issues.length > 0 && (
               <div>
                 <p className="text-sm font-semibold text-slate-300 mb-3">Formatting Issues</p>
                 <div className="space-y-2">
@@ -355,7 +406,7 @@ export default function ResultsPage() {
                 </div>
               </div>
             )}
-            {analysis.ats_breakdown.missing_keywords?.length > 0 && (
+            {analysis.ats_breakdown.missing_keywords.length > 0 && (
               <div>
                 <p className="text-sm font-semibold text-slate-300 mb-3">Missing Keywords</p>
                 <div className="flex flex-wrap gap-2">
@@ -384,9 +435,13 @@ export default function ResultsPage() {
                 <p className="text-sm font-semibold text-green-400">Demonstrated Skills</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {analysis.skills_analysis.strong_skills.map((s, i) => (
-                  <span key={i} className="px-2 py-1 text-xs bg-green-500/10 border border-green-500/20 rounded-md text-green-300">{s}</span>
-                ))}
+                {analysis.skills_analysis.strong_skills.length > 0 ? (
+                  analysis.skills_analysis.strong_skills.map((s, i) => (
+                    <span key={i} className="px-2 py-1 text-xs bg-green-500/10 border border-green-500/20 rounded-md text-green-300">{s}</span>
+                  ))
+                ) : (
+                  <EmptyState message="None detected" />
+                )}
               </div>
             </div>
 
@@ -396,11 +451,12 @@ export default function ResultsPage() {
                 <p className="text-sm font-semibold text-yellow-400">Listed But Unproven</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {analysis.skills_analysis.weak_skills?.map((s, i) => (
-                  <span key={i} className="px-2 py-1 text-xs bg-yellow-500/10 border border-yellow-500/20 rounded-md text-yellow-300">{s}</span>
-                ))}
-                {(!analysis.skills_analysis.weak_skills || analysis.skills_analysis.weak_skills.length === 0) && (
-                  <span className="text-slate-500 text-sm">None detected</span>
+                {analysis.skills_analysis.weak_skills.length > 0 ? (
+                  analysis.skills_analysis.weak_skills.map((s, i) => (
+                    <span key={i} className="px-2 py-1 text-xs bg-yellow-500/10 border border-yellow-500/20 rounded-md text-yellow-300">{s}</span>
+                  ))
+                ) : (
+                  <EmptyState message="None detected" />
                 )}
               </div>
             </div>
@@ -411,9 +467,13 @@ export default function ResultsPage() {
                 <p className="text-sm font-semibold text-red-400">Missing Skills</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                {analysis.skills_analysis.missing_skills.map((s, i) => (
-                  <span key={i} className="px-2 py-1 text-xs bg-red-500/10 border border-red-500/20 rounded-md text-red-300">{s}</span>
-                ))}
+                {analysis.skills_analysis.missing_skills.length > 0 ? (
+                  analysis.skills_analysis.missing_skills.map((s, i) => (
+                    <span key={i} className="px-2 py-1 text-xs bg-red-500/10 border border-red-500/20 rounded-md text-red-300">{s}</span>
+                  ))
+                ) : (
+                  <EmptyState message="None detected" />
+                )}
               </div>
             </div>
 
@@ -453,7 +513,7 @@ export default function ResultsPage() {
         )}
 
         {/* ── Strengths ── */}
-        {analysis.strengths?.length > 0 && (
+        {analysis.strengths.length > 0 && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8">
             <div className="flex items-center gap-3 mb-6">
               <CheckCircle className="w-6 h-6 text-green-400" />
@@ -469,8 +529,6 @@ export default function ResultsPage() {
             </div>
           </div>
         )}
-
-        {/* Internship Matching — Phase 2 */}
 
       </main>
     </div>
