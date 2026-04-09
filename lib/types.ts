@@ -4,70 +4,119 @@
 // pdf.worker.js) and crashing with a client-side exception.
 
 // ── API Response Contract ─────────────────────────────────────────────────────
-// The `mode` discriminator tells the frontend exactly what shape to expect.
-// NEVER return a success response without a mode field — it forces explicit
-// handling on the frontend and prevents silent breakage when AI is toggled.
 
 export type APIErrorCode =
-  | 'NO_FILE'        // file field missing from form data
-  | 'INVALID_PDF'    // file doesn't start with %PDF header
-  | 'PDF_ENCRYPTED'  // password-protected PDF
-  | 'PARSE_FAILED'   // both pdf-parse and regex fallback returned < 20 chars
-  | 'PARSER_UNAVAILABLE' // require('pdf-parse') didn't return a function
-  | 'AI_FAILED'      // Groq call threw or returned unparseable JSON
-  | 'RATE_LIMITED'   // too many requests
-  | 'SERVER_ERROR';  // unhandled exception
+  | 'NO_FILE'
+  | 'INVALID_PDF'
+  | 'PDF_ENCRYPTED'
+  | 'PARSE_FAILED'
+  | 'PARSER_UNAVAILABLE'
+  | 'AI_FAILED'
+  | 'RATE_LIMITED'
+  | 'SERVER_ERROR';
 
 export type ErrorResponse = {
   ok: false;
   mode: 'error';
-  error: string;       // human-readable message for display
-  code: APIErrorCode;  // machine-readable for frontend branching
+  error: string;
+  code: APIErrorCode;
 };
 
-// Extraction-only mode: AI disabled, returns raw text preview for verification
 export type ExtractionResponse = {
   ok: true;
   mode: 'extraction';
-  full_text_length: number; // full extracted char count — NOT the preview length
-  preview_text: string;     // first 500 chars only — intentionally partial
-  truncated: false;         // always false in extraction mode, no AI truncation
+  full_text_length: number;
+  preview_text: string;
+  truncated: false;
   elapsed_ms: number;
 };
 
-// Full analysis mode: AI enabled, returns complete scored result
 export type AnalysisResponse = {
   ok: true;
   mode: 'analysis';
   full_text_length: number;
   preview_text: string;
-  truncated: boolean;      // true if resumeText was trimmed before sending to AI
+  truncated: boolean;
   elapsed_ms: number;
   analysis: AnalysisResult;
 };
 
 export type APIResponse = ExtractionResponse | AnalysisResponse | ErrorResponse;
 
-// ── Resume Analysis Result ────────────────────────────────────────────────────
+// ── Red Flag ──────────────────────────────────────────────────────────────────
+// A string is not enough — severity drives UI priority and score caps.
+// Critical = immediate rejection trigger. High = strong disadvantage. Medium = notable gap.
+
+export interface RedFlag {
+  flag: string;     // the specific problem, no softening
+  severity: 'Critical' | 'High' | 'Medium';
+  impact: string;   // the concrete hiring consequence
+}
+
+// ── Dimension Scores ──────────────────────────────────────────────────────────
+// Six independent axes. The aggregate score hides where the real problem is.
+// Showing dimensions lets the user know exactly where to spend the next hour.
+
+export interface DimensionScores {
+  technical_depth:       number;  // code complexity, CS fundamentals, tooling depth
+  project_impact:        number;  // scale, measurable outcome, individual contribution
+  experience_relevance:  number;  // how relevant past roles are to the target role
+  ats_compatibility:     number;  // formatting, keywords, parseability
+  narrative_clarity:     number;  // action verbs, specificity, no fluff
+  completeness:          number;  // required sections present and populated
+}
+
+// ── Hiring Prediction ─────────────────────────────────────────────────────────
+// This is the output users actually care about: will they get hired or not.
+// "You scored 67" is academic. "Unlikely to pass FAANG screening" is actionable.
+
+export interface HiringPrediction {
+  outcome: 'Strong' | 'Possible' | 'Unlikely' | 'No';
+  screen_pass_rate: number;   // estimated % of applications that clear ATS
+  competitive_tier: 'FAANG' | 'Top-50' | 'Mid-Market' | 'Startup-Only' | 'Not-Ready';
+  verdict: string;            // one specific, unambiguous sentence
+}
+
+// ── Analysis Result ───────────────────────────────────────────────────────────
 
 export interface AnalysisResult {
+  // Role detection — must happen before scoring. Wrong role = wrong advice.
+  detected_role: string;    // 'SWE' | 'Data' | 'DevOps' | 'PM' | 'Design' | 'IT-Ops' | 'Career-Pivot' | 'Unknown'
+  role_confidence: number;  // 0-100. If < 60, advice carries a caveat.
+  is_career_pivot: boolean; // triggers a different feedback path entirely
+
+  // Hiring outcome — shown first in UI. This is the product's core value.
+  hiring_prediction: HiringPrediction;
+
+  // Scores — the aggregate AND the breakdown
   final_score: number;
+  dimension_scores: DimensionScores;
+
+  // Kept for backward compat with ScoreBar components
   content_score: number;
   ats_score: number;
+
   has_metrics: boolean;
   profile_strength: 'Weak' | 'Average' | 'Good' | 'Strong';
   summary: string;
+
+  // Red flags as structured objects — severity drives both UI and score caps
+  red_flags: RedFlag[];
+
   strengths: string[];
   issues: string[];
-  red_flags: string[];
-  action_plan: string[];
+  action_plan: string[];  // ordered by impact, not importance — item 1 matters most
+  top_priority: string;   // single highest-leverage action, pulled out explicitly
+
   skills_analysis: {
-    strong_skills: string[];
-    weak_skills: string[];
-    missing_skills: string[];
+    strong_skills: string[];   // backed by project/work evidence
+    weak_skills: string[];     // listed but not demonstrated
+    missing_skills: string[];  // important skills absent — verified against resume text
   };
+
   project_analysis: string;
   experience_analysis: string;
+
   ats_breakdown: {
     parsing_risk: 'None' | 'Low' | 'Medium' | 'High' | 'Critical';
     keyword_density: 'None' | 'Low' | 'Adequate' | 'Strong';
@@ -75,10 +124,12 @@ export interface AnalysisResult {
     missing_keywords: string[];
     ats_verdict: string;
   };
+
   upgrade_insight: {
     action: string;
     expected_score_increase: number;
     reason: string;
   };
+
   competitive_position: string;
 }

@@ -3,87 +3,125 @@ import type { ExtractionResponse, AnalysisResponse, ErrorResponse } from '@/lib/
 import { normalizeAnalysisResult } from '@/lib/normalize';
 
 // ── Feature flag ──────────────────────────────────────────────────────────────
-// false  → extraction-only (verify PDF parsing without burning Groq tokens)
-// true   → full AI analysis (requires GROQ_API_KEY in environment)
-const AI_ENABLED = true;
+const AI_ENABLED    = true;
+const AI_CHAR_LIMIT = 6000;
+const PREVIEW_CHARS = 500;
+const GROQ_TIMEOUT  = 8000; // ms — headroom under Vercel 10s maxDuration
 
-const AI_CHAR_LIMIT  = 6000;  // chars sent to AI — Groq context + cost ceiling
-const PREVIEW_CHARS  = 500;   // chars in preview_text field
-const GROQ_TIMEOUT   = 8000;  // ms — leave headroom under Vercel's 10s maxDuration
+// ── AI Prompt ─────────────────────────────────────────────────────────────────
+// Design principles:
+// 1. Role detection is the first job — wrong role = wrong advice.
+// 2. All scoring rubrics are explicit — no room for the model to invent criteria.
+// 3. Red flags are objects with severity — a string isn't enough.
+// 4. `top_priority` is extracted separately so the UI can surface it prominently.
+// 5. The model is instructed to be pessimistic rather than optimistic — false
+//    confidence is the failure mode we're protecting against.
+// 6. All enum values are listed — model cannot hallucinate new values.
+// temperature: 0.1 + json_object mode makes structural drift rare.
+// normalizeAnalysisResult is the safety net if drift still occurs.
 
-// ── AI prompt ─────────────────────────────────────────────────────────────────
-// Constraints are explicit so the model cannot guess field names or enum values.
-// temperature: 0.1 + json_object mode makes hallucinated structure extremely rare.
-// normalizeAnalysisResult is the safety net if the model still drifts.
-const GROQ_SYSTEM_PROMPT = `You are an expert resume analyst evaluating resumes for competitive tech internship programs.
+const GROQ_SYSTEM_PROMPT = `You are a senior technical recruiter at a top-tier tech company. You have reviewed 10,000+ resumes. You are not here to encourage — you are here to give the honest assessment that a recruiter makes in the first 10 seconds.
 
-Analyze the provided resume text and return a single JSON object. No markdown, no explanation, no code fences — raw JSON only.
+Analyze the provided resume text and return a single JSON object. No markdown. No explanation. No code fences. Raw JSON only.
 
-SCORING RUBRIC
-content_score (0–100):
-  - Skills relevance to CS/SWE internships: 30 pts
-  - Project quality and demonstrated impact: 30 pts
-  - Work experience relevance: 20 pts
-  - Resume completeness and clarity: 20 pts
+STEP 1: DETECT THE ROLE first. Everything else depends on this.
+Roles: "SWE" (software engineering), "Data" (data science/analytics), "DevOps" (infra/cloud/SRE), "PM" (product management), "Design" (UI/UX), "IT-Ops" (IT support/sysadmin), "Career-Pivot" (experience doesn't match apparent target), "Unknown"
+Set role_confidence 0-100. If < 60, you are guessing — note this in the verdict.
+Set is_career_pivot: true if the work history does not match the expected skills for the target role.
 
-ats_score (0–100):
-  - Clean, standard formatting (no tables/columns): 25 pts
-  - Keyword density for CS roles: 25 pts
-  - Standard section headings present: 25 pts
-  - No parsing blockers (images, graphics, headers/footers): 25 pts
+SCORING RUBRICS (score against the detected role's standards, not generic standards):
 
-profile_strength thresholds: Strong ≥ 80, Good 65–79, Average 45–64, Weak 0–44
+technical_depth (0-100): For SWE: does the resume demonstrate actual programming depth? Real complexity, not just tool names. 0 = tool names with no evidence of usage. 100 = complex systems, contributions to real codebases with measurable complexity.
 
-REQUIRED JSON SCHEMA — every field is required:
+project_impact (0-100): Does any project show real scale, real users, or real measurable outcomes? 0 = no projects or projects with no outcomes stated. 50 = projects exist but are toy/tutorial level. 100 = projects with scale metrics, users, or production deployment.
+
+experience_relevance (0-100): How directly does work history map to the target role? 0 = entirely different field. 100 = directly relevant at increasing scope.
+
+ats_compatibility (0-100): Standard sections? Clean formatting? Parseable? 0 = tables/columns/images/headers. 100 = clean single-column, standard section names.
+
+narrative_clarity (0-100): Are bullets action-verb + specific outcome? Or responsibility-statements? 0 = "helped with", "assisted in", "responsible for". 100 = "built X that reduced Y by Z%".
+
+completeness (0-100): Are all expected sections present? For SWE intern: Education (with graduation date), Projects, Skills, Experience (if any), Contact. 30 points off per missing required section.
+
+RED FLAG RULES: Only include real rejection triggers. Each flag must be specific to this resume, not generic advice. Severity:
+- Critical: eliminates the resume before a human sees it, or causes immediate rejection
+- High: strong disadvantage in competitive pools
+- Medium: noticeable gap that hurts in close comparisons
+
+HIRING PREDICTION RULES: Be pessimistic. Most resumes get rejected.
+- outcome "Strong": resume consistently lands interviews at target tier, no critical flags
+- outcome "Possible": gets interviews at mid-tier companies if well-targeted
+- outcome "Unlikely": occasional interviews but usually rejected; needs significant work
+- outcome "No": will not get interviews in current state
+- screen_pass_rate: realistic estimate of % of applications that clear initial ATS/screen
+- competitive_tier: "FAANG" (top 5 companies), "Top-50" (well-known tech companies), "Mid-Market" (solid tech companies), "Startup-Only" (only realistic target), "Not-Ready" (not viable yet)
+
+REQUIRED JSON SCHEMA — all fields required:
 {
-  "content_score": integer 0–100,
-  "ats_score": integer 0–100,
-  "has_metrics": boolean (true if any bullet point contains a number/percentage/dollar amount),
-  "profile_strength": "Weak" | "Average" | "Good" | "Strong",
-  "summary": string (2–3 sentences, direct recruiter verdict — no generic praise),
-  "strengths": string[] (3–5 specific genuine strengths with evidence from the resume),
-  "issues": string[] (3–5 specific, actionable problems — not vague),
-  "red_flags": string[] (things that cause immediate rejection or credibility loss — empty array if none),
-  "action_plan": string[] (exactly 5 prioritized improvement steps, most impactful first),
-  "skills_analysis": {
-    "strong_skills": string[] (skills backed by project/work evidence),
-    "weak_skills": string[] (skills listed in skills section but not demonstrated anywhere),
-    "missing_skills": string[] (important CS internship skills absent from resume)
+  "detected_role": string,
+  "role_confidence": integer 0-100,
+  "is_career_pivot": boolean,
+  "hiring_prediction": {
+    "outcome": "Strong" | "Possible" | "Unlikely" | "No",
+    "screen_pass_rate": integer 0-100,
+    "competitive_tier": "FAANG" | "Top-50" | "Mid-Market" | "Startup-Only" | "Not-Ready",
+    "verdict": string (one direct, unambiguous sentence — no softening)
   },
-  "project_analysis": string (2–3 sentences on project complexity, impact, and stack — be specific),
-  "experience_analysis": string (2–3 sentences on work experience depth and relevance — be specific),
+  "content_score": integer 0-100,
+  "ats_score": integer 0-100,
+  "has_metrics": boolean,
+  "summary": string (2-3 sentences, direct recruiter perspective — comfortable truths are useless),
+  "dimension_scores": {
+    "technical_depth": integer 0-100,
+    "project_impact": integer 0-100,
+    "experience_relevance": integer 0-100,
+    "ats_compatibility": integer 0-100,
+    "narrative_clarity": integer 0-100,
+    "completeness": integer 0-100
+  },
+  "red_flags": [
+    {
+      "flag": string (specific to this resume, not generic),
+      "severity": "Critical" | "High" | "Medium",
+      "impact": string (the exact hiring consequence)
+    }
+  ],
+  "strengths": string[] (3-5 specific genuine strengths with evidence from the resume — no generic praise),
+  "issues": string[] (3-6 specific, actionable issues ordered by severity),
+  "top_priority": string (the single change that will have the most impact on getting interviews — be specific),
+  "action_plan": string[] (5 steps ordered by hiring impact, most impactful first),
+  "skills_analysis": {
+    "strong_skills": string[] (skills with actual evidence in projects or work history),
+    "weak_skills": string[] (skills listed in skills section but not demonstrated anywhere in the resume),
+    "missing_skills": string[] (important skills absent for the detected role — only list skills NOT already on the resume)
+  },
+  "project_analysis": string (2-3 sentences on project complexity and impact — be specific about what's missing),
+  "experience_analysis": string (2-3 sentences on work experience depth and relevance — be specific),
   "ats_breakdown": {
     "parsing_risk": "None" | "Low" | "Medium" | "High" | "Critical",
     "keyword_density": "None" | "Low" | "Adequate" | "Strong",
-    "formatting_issues": string[] (specific formatting problems — empty array if none),
-    "missing_keywords": string[] (important tech keywords missing for CS roles),
-    "ats_verdict": string (one sentence — will this resume survive automated filtering?)
+    "formatting_issues": string[],
+    "missing_keywords": string[],
+    "ats_verdict": string
   },
   "upgrade_insight": {
-    "action": string (single highest-impact action the candidate can take this week),
-    "expected_score_increase": integer 1–20,
-    "reason": string (why this specific action matters most for this specific resume)
+    "action": string (single highest-impact change this specific candidate can make this week),
+    "expected_score_increase": integer 1-20,
+    "reason": string (why this specific action matters for this specific resume)
   },
-  "competitive_position": string (1–2 sentences on where this candidate sits vs top-25% CS internship applicants)
+  "competitive_position": string (where does this candidate realistically sit vs. the applicant pool they're competing in)
 }
 
-Be direct and specific. Generic feedback like "improve your projects" is worthless. Reference what you actually see in the resume.`;
+CRITICAL: Do not invent skills as "missing" if they appear in the resume. Do not give "Strong" or "Possible" outcome when Critical red flags exist. If the resume has no projects, project_impact must be 0. Generic feedback is worthless — reference specifics from the resume text.`;
 
 // ── pdf-parse import ──────────────────────────────────────────────────────────
-// DO NOT use `import pdfParse from 'pdf-parse'`.
-// With tsconfig `module: 'esnext'` + `moduleResolution: 'bundler'`, TypeScript
-// emits a native ESM import. Webpack's CJS interop for external packages can
-// resolve the default binding to `undefined` instead of the exported function
-// because pdf-parse uses `module.exports = fn` with no `.default` property.
-// Calling `undefined(buffer)` throws TypeError synchronously → the async
-// wrapper returns an immediately-rejected Promise → catch fires in ~0ms →
-// regex also finds nothing → "All extraction methods failed [+2ms]".
-// `require()` bypasses all ESM interop and gets the function directly.
+// require() instead of ESM import — avoids CJS/ESM interop where the default
+// binding resolves to undefined and pdfParse(buffer) throws synchronously.
 const pdfParse: (buf: Buffer | Uint8Array, opts?: object) => Promise<{ text: string }> =
   // eslint-disable-next-line
   require('pdf-parse');
 
-export const runtime = 'nodejs';
+export const runtime    = 'nodejs';
 export const maxDuration = 10;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -99,18 +137,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 function decodePDFStr(s: string): string {
   return s
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\\\(/g, '(')
-    .replace(/\\\)/g, ')')
-    .replace(/\\\\/g, '\\')
+    .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+    .replace(/\\\(/g, '(').replace(/\\\)/g, ')').replace(/\\\\/g, '\\')
     .replace(/\\(\d{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
 }
 
-// Scans raw PDF bytes for uncompressed BT/ET text blocks.
-// Returns '' for FlateDecode-compressed PDFs — that's expected, not a bug.
-// Synchronous, zero I/O, cannot hang.
 function extractWithRegex(buffer: Buffer): string {
   const str = buffer.toString('latin1');
   const parts: string[] = [];
@@ -133,9 +164,9 @@ function extractWithRegex(buffer: Buffer): string {
 }
 
 // ── Groq API call ─────────────────────────────────────────────────────────────
-// Returns the raw parsed JSON object — caller must pass it through
-// normalizeAnalysisResult before using it.
-// Throws on network failure, non-200 response, or unparseable JSON.
+// Returns raw parsed JSON — caller passes it through normalizeAnalysisResult.
+// Throws on: missing API key, network failure, non-200, unparseable content.
+
 async function callGroq(resumeText: string): Promise<unknown> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('GROQ_API_KEY is not set');
@@ -143,18 +174,15 @@ async function callGroq(resumeText: string): Promise<unknown> {
   const response = await withTimeout(
     fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'llama-3.3-70b-versatile',
         response_format: { type: 'json_object' },
         temperature: 0.1,
-        max_tokens: 2048,
+        max_tokens: 2500,
         messages: [
           { role: 'system', content: GROQ_SYSTEM_PROMPT },
-          { role: 'user', content: `RESUME TEXT:\n\n${resumeText}` },
+          { role: 'user',   content: `RESUME TEXT:\n\n${resumeText}` },
         ],
       }),
     }),
@@ -169,11 +197,8 @@ async function callGroq(resumeText: string): Promise<unknown> {
 
   const groqJson = await response.json();
   const content: string = groqJson?.choices?.[0]?.message?.content ?? '';
-
   if (!content) throw new Error('Groq returned empty content');
 
-  // response_format: json_object guarantees valid JSON, but we still wrap in
-  // try/catch because the guarantee is model-level, not network-level.
   try {
     return JSON.parse(content);
   } catch {
@@ -196,17 +221,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(body, { status: 400 });
     }
 
-    const bytes = await file.arrayBuffer();
+    const bytes  = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
+    console.log(`📥 Received file: "${file.name}" — ${buffer.length} bytes`);
 
-    console.log(`📥 Received file: "${file.name}" — buffer length: ${buffer.length} bytes`);
-
-    // ── 2. PDF signature check ─────────────────────────────────────────────────
+    // ── 2. PDF header check ────────────────────────────────────────────────────
     const header = buffer.slice(0, 8).toString('ascii');
-    console.log(`🔍 Header bytes: ${JSON.stringify(header)}`);
-
     if (!header.startsWith('%PDF')) {
-      console.warn('⚠️  Rejected: missing %PDF header');
       const body: ErrorResponse = {
         ok: false, mode: 'error',
         error: 'Not a valid PDF. Export your resume as a PDF and try again.',
@@ -215,32 +236,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(body, { status: 422 });
     }
 
-    // ── 3. Guard: confirm pdfParse is callable ─────────────────────────────────
+    // ── 3. Parser availability guard ──────────────────────────────────────────
     if (typeof pdfParse !== 'function') {
-      console.error('❌ pdfParse is not a function — got:', typeof pdfParse);
       const body: ErrorResponse = { ok: false, mode: 'error', error: 'PDF parser unavailable.', code: 'PARSER_UNAVAILABLE' };
       return NextResponse.json(body, { status: 500 });
     }
 
-    // ── 4. Extract text ────────────────────────────────────────────────────────
+    // ── 4. Text extraction ────────────────────────────────────────────────────
     let resumeText: string | null = null;
 
-    // Primary: pdf-parse
-    console.log(`⏳ pdf-parse started — passing ${buffer.length}-byte Uint8Array`);
     try {
-      const uint8 = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const uint8   = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
       const pdfData = await withTimeout(pdfParse(uint8), 5000, 'pdf-parse');
-      const text = (pdfData.text ?? '').trim();
-      console.log(`📄 pdf-parse result length: ${text.length} chars`);
-      if (text.length >= 20) {
-        resumeText = text;
-        console.log(`✅ pdf-parse success [+${Date.now() - start}ms]`);
-      } else {
-        console.warn(`⚠️  pdf-parse returned ${text.length} chars — below 20-char threshold`);
-      }
+      const text    = (pdfData.text ?? '').trim();
+      console.log(`📄 pdf-parse: ${text.length} chars`);
+      if (text.length >= 20) resumeText = text;
     } catch (e: any) {
-      const msg: string = e?.message ?? String(e);
-      console.warn(`⚠️  pdf-parse failed: "${msg}" [+${Date.now() - start}ms]`);
+      const msg = e?.message ?? String(e);
+      console.warn(`⚠️  pdf-parse failed: ${msg}`);
       if (/decrypt|password/i.test(msg)) {
         const body: ErrorResponse = {
           ok: false, mode: 'error',
@@ -251,26 +264,17 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Fallback: BT/ET regex
     if (!resumeText) {
-      console.warn('⚠️  Fallback triggered — running regex scan');
       try {
         const text = extractWithRegex(buffer);
-        console.log(`📄 Regex fallback result length: ${text.length} chars`);
-        if (text.length >= 20) {
-          resumeText = text;
-          console.log(`✅ Regex fallback used [+${Date.now() - start}ms]`);
-        } else {
-          console.warn(`⚠️  Regex fallback returned ${text.length} chars — not enough`);
-        }
+        console.log(`📄 regex fallback: ${text.length} chars`);
+        if (text.length >= 20) resumeText = text;
       } catch (e: any) {
-        console.warn(`⚠️  Regex fallback threw: ${e?.message ?? e}`);
+        console.warn(`⚠️  regex fallback failed: ${e?.message ?? e}`);
       }
     }
 
-    // ── 5. Final extraction check ──────────────────────────────────────────────
     if (!resumeText) {
-      console.error(`❌ All extraction methods failed [+${Date.now() - start}ms]`);
       const body: ErrorResponse = {
         ok: false, mode: 'error',
         error: 'Could not read text from your PDF. Try re-exporting from Word, Google Docs, or Overleaf.',
@@ -279,24 +283,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(body, { status: 422 });
     }
 
-    console.log(`📄 Final text length: ${resumeText.length} chars [+${Date.now() - start}ms]`);
+    console.log(`📄 Final text: ${resumeText.length} chars [+${Date.now() - start}ms]`);
 
-    // ── 6. Feature flag branch ─────────────────────────────────────────────────
+    // ── 5. Feature flag ───────────────────────────────────────────────────────
     if (!AI_ENABLED) {
       const body: ExtractionResponse = {
-        ok: true,
-        mode: 'extraction',
+        ok: true, mode: 'extraction',
         full_text_length: resumeText.length,
-        preview_text: resumeText.slice(0, PREVIEW_CHARS),
-        truncated: false,
-        elapsed_ms: Date.now() - start,
+        preview_text:     resumeText.slice(0, PREVIEW_CHARS),
+        truncated:        false,
+        elapsed_ms:       Date.now() - start,
       };
       return NextResponse.json(body);
     }
 
-    // ── 7. AI analysis ─────────────────────────────────────────────────────────
-    const truncated = resumeText.length > AI_CHAR_LIMIT;
-    const textForAI = resumeText.slice(0, AI_CHAR_LIMIT);
+    // ── 6. AI analysis ─────────────────────────────────────────────────────────
+    const truncated  = resumeText.length > AI_CHAR_LIMIT;
+    const textForAI  = resumeText.slice(0, AI_CHAR_LIMIT);
 
     console.log(`🤖 Calling Groq — ${textForAI.length} chars, truncated: ${truncated}`);
 
@@ -313,20 +316,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(body, { status: 500 });
     }
 
-    // normalizeAnalysisResult is the contract enforcer — raw AI output never
-    // reaches the frontend directly. Every field is validated and given a safe
-    // default if missing or of the wrong type.
-    const analysis = normalizeAnalysisResult(rawAIOutput);
+    // normalizeAnalysisResult enforces contract and applies anti-inflation rules.
+    // We pass resumeText so it can filter hallucinated missing_skills.
+    const analysis = normalizeAnalysisResult(rawAIOutput, resumeText);
 
-    console.log(`✅ AI analysis complete — score: ${analysis.final_score} [+${Date.now() - start}ms]`);
+    console.log(`✅ Analysis complete — score: ${analysis.final_score}, outcome: ${analysis.hiring_prediction.outcome} [+${Date.now() - start}ms]`);
 
     const successBody: AnalysisResponse = {
-      ok: true,
-      mode: 'analysis',
+      ok: true, mode: 'analysis',
       full_text_length: resumeText.length,
-      preview_text: resumeText.slice(0, PREVIEW_CHARS),
+      preview_text:     resumeText.slice(0, PREVIEW_CHARS),
       truncated,
-      elapsed_ms: Date.now() - start,
+      elapsed_ms:       Date.now() - start,
       analysis,
     };
     return NextResponse.json(successBody);
