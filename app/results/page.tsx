@@ -21,6 +21,9 @@ import {
   Radar,
   Siren,
   BadgeCheck,
+  Lock,
+  Send,
+  FileText,
 } from 'lucide-react';
 import type { AnalysisResult, RedFlag, HiringPrediction } from '@/lib/types';
 import { normalizeAnalysisResult } from '@/lib/normalize';
@@ -115,6 +118,13 @@ export default function ResultsPage() {
   const [progress, setProgress]           = useState(0);
   const [sessionError, setSessionError]   = useState(false);
   const [isTruncated, setIsTruncated]     = useState(false);
+
+  // Apply Engine state
+  const [jdText, setJdText]               = useState('');
+  const [applyLoading, setApplyLoading]   = useState(false);
+  const [applyPreview, setApplyPreview]   = useState<string | null>(null);
+  const [applyError, setApplyError]       = useState<string | null>(null);
+
   const router = useRouter();
 
   useEffect(() => {
@@ -186,6 +196,39 @@ export default function ResultsPage() {
         </div>
       </div>
     );
+  }
+
+  // ── Apply Engine handler ───────────────────────────────────────────────────────
+  async function generateApplyPreview() {
+    if (!analysis || jdText.trim().length < 50) return;
+    setApplyLoading(true);
+    setApplyPreview(null);
+    setApplyError(null);
+    try {
+      const res = await fetch('/api/apply-preview', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jd: jdText.trim(),
+          analysis: {
+            detected_role:       analysis.detected_role,
+            project_analysis:    analysis.project_analysis,
+            experience_analysis: analysis.experience_analysis,
+            strengths:           analysis.strengths,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setApplyPreview(data.preview as string);
+      } else {
+        setApplyError((data.error as string) || 'Generation failed. Try again.');
+      }
+    } catch {
+      setApplyError('Network error. Please try again.');
+    } finally {
+      setApplyLoading(false);
+    }
   }
 
   // All fields are safe after normalization.
@@ -495,6 +538,114 @@ export default function ResultsPage() {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* ── Apply Engine ── */}
+        <div className="bg-slate-900 border border-purple-500/30 rounded-2xl p-6 md:p-8">
+          {/* Header */}
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-10 h-10 rounded-xl bg-purple-500/15 flex items-center justify-center flex-shrink-0">
+              <Send className="w-5 h-5 text-purple-400" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold">Apply Engine</h2>
+              <p className="text-slate-400 text-sm">Paste a job description → get the first paragraph of your tailored cover letter</p>
+            </div>
+          </div>
+
+          <div className="mt-6 space-y-4">
+            {/* JD textarea */}
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-2">
+                Job Description
+              </label>
+              <textarea
+                value={jdText}
+                onChange={(e) => {
+                  setJdText(e.target.value);
+                  if (applyPreview) { setApplyPreview(null); setApplyError(null); }
+                }}
+                placeholder="Paste the full job description here..."
+                rows={6}
+                className="w-full rounded-xl bg-slate-800 border border-slate-700 px-4 py-3 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 resize-y transition-colors"
+              />
+              <p className="text-xs text-slate-500 mt-1">
+                {jdText.trim().length < 50
+                  ? `${Math.max(0, 50 - jdText.trim().length)} more characters needed`
+                  : `${jdText.trim().length} chars — ready`}
+              </p>
+            </div>
+
+            {/* Generate button */}
+            <button
+              onClick={generateApplyPreview}
+              disabled={applyLoading || jdText.trim().length < 50}
+              className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-xl gradient-purple text-white font-semibold text-sm disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity"
+            >
+              {applyLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Generating preview…
+                </>
+              ) : (
+                <>
+                  <FileText className="w-4 h-4" />
+                  Generate Cover Letter Preview
+                </>
+              )}
+            </button>
+
+            {/* Error */}
+            {applyError && (
+              <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-300 text-sm">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                {applyError}
+              </div>
+            )}
+
+            {/* Preview result */}
+            {applyPreview && (
+              <div className="space-y-0 rounded-xl overflow-hidden border border-slate-700">
+                {/* Visible first paragraph */}
+                <div className="bg-slate-800/60 p-5">
+                  <div className="flex items-center gap-2 mb-3">
+                    <CheckCircle className="w-4 h-4 text-green-400" />
+                    <span className="text-xs font-semibold text-green-400 uppercase tracking-wide">Opening Paragraph — Tailored to This JD</span>
+                  </div>
+                  <p className="text-slate-200 text-sm leading-relaxed">{applyPreview}</p>
+                </div>
+
+                {/* Blurred "rest of the letter" teaser */}
+                <div className="relative bg-slate-800/40">
+                  {/* Fake blurred content */}
+                  <div className="px-5 pt-4 pb-2 blur-sm select-none pointer-events-none" aria-hidden="true">
+                    <p className="text-slate-300 text-sm leading-relaxed mb-3">
+                      In my previous role I led the development of a high-throughput data pipeline that processed over 2 million records daily, reducing reporting latency from 4 hours to under 8 minutes. This experience maps directly to the scalability challenges mentioned in your engineering requirements, and I am confident I can bring the same systems-first mindset to your team.
+                    </p>
+                    <p className="text-slate-300 text-sm leading-relaxed">
+                      Beyond technical execution, I have consistently operated as a cross-functional partner — coordinating with product, design, and stakeholders to ship features that balance engineering rigor with business velocity. I believe the best engineers are translators, and I have spent my career building that muscle.
+                    </p>
+                  </div>
+
+                  {/* Paywall overlay */}
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-slate-900/60 to-slate-900/95 px-6 py-6">
+                    <div className="w-10 h-10 rounded-full bg-purple-500/20 border border-purple-500/30 flex items-center justify-center mb-3">
+                      <Lock className="w-5 h-5 text-purple-400" />
+                    </div>
+                    <p className="text-white font-semibold text-center mb-1">Full cover letter + email + LinkedIn DM</p>
+                    <p className="text-slate-400 text-sm text-center mb-4">3 tailored documents, generated in seconds.</p>
+                    <button
+                      disabled
+                      className="px-5 py-2.5 rounded-lg bg-purple-600/50 text-white text-sm font-semibold cursor-not-allowed opacity-70 border border-purple-500/30"
+                    >
+                      Unlock Full Version — Coming Soon
+                    </button>
+                    <p className="text-slate-500 text-xs mt-2">Free during beta</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

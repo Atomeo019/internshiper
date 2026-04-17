@@ -89,19 +89,19 @@ REQUIRED JSON SCHEMA — all fields required:
   "strengths": string[] (3-5 specific genuine strengths with evidence from the resume — no generic praise),
   "issues": string[] (3-6 specific, actionable issues ordered by severity),
   "top_priority": string (the single change that will have the most impact on getting interviews — be specific),
-  "action_plan": string[] (5 steps ordered by hiring impact, most impactful first),
+  "action_plan": string[] (7 steps ordered by hiring impact, most impactful first — generate all 7 even if some seem minor; they will be filtered downstream),
   "skills_analysis": {
     "strong_skills": string[] (skills with actual evidence in projects or work history),
     "weak_skills": string[] (skills listed in skills section but not demonstrated anywhere in the resume),
     "missing_skills": string[] (important skills absent for the detected role — only list skills NOT already on the resume)
   },
-  "project_analysis": string (2-3 sentences on project complexity and impact — be specific about what's missing),
-  "experience_analysis": string (2-3 sentences on work experience depth and relevance — be specific),
+  "project_analysis": string (Lead with actual project names and tech stacks from the resume. Then assess complexity. Example: "Built 'ResumeRoast' using Next.js and Groq API, deployed on Vercel. Also built a Discord bot in Python. Projects have no stated user counts or production metrics." Never say "the candidate" or give generic advice — name the actual projects.),
+  "experience_analysis": string (Name the actual roles and companies from the resume. Describe what they built or owned. Then assess depth. Example: "Interned at XYZ as a backend intern for 3 months, owning the payment integration module. No full-time roles." If no experience, say exactly that.),
   "ats_breakdown": {
     "parsing_risk": "None" | "Low" | "Medium" | "High" | "Critical",
     "keyword_density": "None" | "Low" | "Adequate" | "Strong",
     "formatting_issues": string[],
-    "missing_keywords": string[],
+    "missing_keywords": string[] (ONLY specific technologies or tools from the JD that are absent from the resume — e.g., "Docker", "FastAPI", "PostgreSQL". NEVER list generic buzzwords like "cloud computing", "agile methodologies", "version control", "CI/CD" unless those exact strings appear in the resume as skills),
     "ats_verdict": string
   },
   "upgrade_insight": {
@@ -112,7 +112,15 @@ REQUIRED JSON SCHEMA — all fields required:
   "competitive_position": string (where does this candidate realistically sit vs. the applicant pool they're competing in)
 }
 
-CRITICAL: Do not invent skills as "missing" if they appear in the resume. Do not give "Strong" or "Possible" outcome when Critical red flags exist. If the resume has no projects, project_impact must be 0. Generic feedback is worthless — reference specifics from the resume text.`;
+CRITICAL: Do not invent skills as "missing" if they appear in the resume. Do not give "Strong" or "Possible" outcome when Critical red flags exist. If the resume has no projects, project_impact must be 0. Generic feedback is worthless — reference specifics from the resume text.
+
+CRITICAL: action_plan must NOT be circular. If the candidate is clearly seeking internships (student, graduation date in future, no full-time roles), do NOT include "pursue internships" as an action — they already are. Do NOT suggest "build an online presence" if they already list articles, a portfolio, or GitHub. Every action must be something they can actually do this week that they are NOT already doing.
+
+CRITICAL: Do NOT include "network with professionals", "attend industry meetups", "connect with people in the field", or any variant of vague networking advice in action_plan, top_priority, or upgrade_insight.action. Networking advice is unmeasurable and unactionable. Instead, give specific technical improvements they can make to the resume itself.
+
+CRITICAL: Do NOT flag "lack of direct industry experience" or "no full-time experience" as a Critical or High red flag for candidates who are students or clearly seeking their first internship. Lack of experience is expected for an internship seeker — it is not a disqualifying red flag. Reserve Critical/High red flags for actual disqualifying issues: formatting problems, missing critical skills explicitly required by typical roles, or no projects at all.
+
+CRITICAL: missing_skills must only contain specific named skills not found anywhere in the resume. Do NOT list generic categories ("cloud computing", "agile methodologies", "containerization", "CI/CD", "version control") when specific implementations of those categories ARE already on the resume (e.g., if Docker is listed, "containerization" is NOT missing).`;
 
 // ── pdf-parse import ──────────────────────────────────────────────────────────
 // require() instead of ESM import — avoids CJS/ESM interop where the default
@@ -120,6 +128,13 @@ CRITICAL: Do not invent skills as "missing" if they appear in the resume. Do not
 const pdfParse: (buf: Buffer | Uint8Array, opts?: object) => Promise<{ text: string }> =
   // eslint-disable-next-line
   require('pdf-parse');
+
+// ── pdfjs-dist import ─────────────────────────────────────────────────────────
+// Legacy build runs without web workers — safe in Node.js serverless env.
+// Used as primary extractor for reliable page-by-page multipage support.
+// eslint-disable-next-line
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+if (pdfjsLib.GlobalWorkerOptions) pdfjsLib.GlobalWorkerOptions.workerSrc = '';
 
 export const runtime    = 'nodejs';
 export const maxDuration = 10;
@@ -243,27 +258,60 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 4. Text extraction ────────────────────────────────────────────────────
+    // Strategy (most reliable → least):
+    //   1. pdfjs-dist  — page-by-page, handles multipage PDFs correctly
+    //   2. pdf-parse   — pass buffer directly (no Uint8Array; avoids byteOffset bug)
+    //   3. regex BT/ET — last-resort raw stream scrape
     let resumeText: string | null = null;
 
+    // 4a. pdfjs-dist page-by-page extraction
     try {
-      const uint8   = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-      const pdfData = await withTimeout(pdfParse(uint8), 5000, 'pdf-parse');
-      const text    = (pdfData.text ?? '').trim();
-      console.log(`📄 pdf-parse: ${text.length} chars`);
+      // new Uint8Array(buffer) copies elements → byteOffset is always 0, safe
+      const data        = new Uint8Array(buffer);
+      const loadingTask = pdfjsLib.getDocument({ data });
+      const pdf         = await withTimeout(loadingTask.promise as Promise<any>, 6000, 'pdfjs-load') as any;
+      const numPages: number = pdf.numPages as number;
+      console.log(`📄 pdfjs: ${numPages} page(s) detected`);
+
+      const pageTexts: string[] = [];
+      for (let i = 1; i <= numPages; i++) {
+        const page    = await (pdf.getPage(i) as Promise<any>);
+        const content = await (page.getTextContent() as Promise<any>);
+        const pageStr = (content.items as any[])
+          .map((item) => (typeof item.str === 'string' ? item.str : ''))
+          .join(' ');
+        pageTexts.push(pageStr);
+      }
+
+      const text = pageTexts.join('\n').replace(/\s+/g, ' ').trim();
+      console.log(`📄 pdfjs: ${text.length} chars from ${numPages} page(s)`);
       if (text.length >= 20) resumeText = text;
     } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      console.warn(`⚠️  pdf-parse failed: ${msg}`);
-      if (/decrypt|password/i.test(msg)) {
-        const body: ErrorResponse = {
-          ok: false, mode: 'error',
-          error: 'PDF is password-protected. Remove the password and try again.',
-          code: 'PDF_ENCRYPTED',
-        };
-        return NextResponse.json(body, { status: 422 });
+      console.warn(`⚠️  pdfjs-dist failed: ${e?.message ?? e}`);
+    }
+
+    // 4b. pdf-parse fallback — pass buffer directly (fixes the byteOffset bug)
+    if (!resumeText) {
+      try {
+        const pdfData = await withTimeout(pdfParse(buffer), 5000, 'pdf-parse');
+        const text    = (pdfData.text ?? '').trim();
+        console.log(`📄 pdf-parse fallback: ${text.length} chars`);
+        if (text.length >= 20) resumeText = text;
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        console.warn(`⚠️  pdf-parse failed: ${msg}`);
+        if (/decrypt|password/i.test(msg)) {
+          const body: ErrorResponse = {
+            ok: false, mode: 'error',
+            error: 'PDF is password-protected. Remove the password and try again.',
+            code: 'PDF_ENCRYPTED',
+          };
+          return NextResponse.json(body, { status: 422 });
+        }
       }
     }
 
+    // 4c. Regex BT/ET raw stream scrape (last resort)
     if (!resumeText) {
       try {
         const text = extractWithRegex(buffer);
